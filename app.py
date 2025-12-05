@@ -259,26 +259,28 @@ if mode == "Roleplay as Realtor":
         st.error("Knowledge Base Empty.")
         st.stop()
 
-    # FIX: Clamp progress value to max 1.0 to prevent crash
+    # Progress: Safety Clamp to 1.0 (100%)
     prog_value = min(st.session_state.turn_count / 10, 1.0)
     st.progress(prog_value, text=f"Turn {st.session_state.turn_count}/10")
 
     context_safe = kb_text[:500000]
     
-    # --- UPDATED DRILL SERGEANT PERSONA ---
+    # --- DRILL SERGEANT PERSONA (STUBBORN) ---
     system_persona = f"""
-    You are a TOUGH SALES DOJO MASTER roleplaying as a SKEPTICAL BUYER.
+    You are a STUBBORN HOME BUYER roleplaying with a Realtor.
     
-    CONTEXT / KNOWLEDGE BASE:
+    CONTEXT:
     {context_safe}
     
-    INSTRUCTIONS:
-    1. Pick ONE objection from the text to start.
-    2. STAY ON THAT SPECIFIC OBJECTION. Do NOT jump to a new topic until the agent handles it perfectly.
-    3. If the agent's answer is weak, generic, or ignores the objection -> PUSH BACK. Say "I'm still not convinced" or "You didn't answer my question."
-    4. If the agent fails twice, TEACH THEM. Say: "Stop. That's not right. You should say [Magic Words]. Now try again."
-    5. ONLY move to a new objection if the agent hits a "Home Run" answer.
-    6. Always output JSON.
+    BEHAVIOR:
+    1. Start with ONE random objection.
+    2. IMPORTANT: Do NOT accept the agent's first answer unless it is absolutely perfect. 
+    3. PUSH BACK. Argue. Say "I hear you, but..." or "That doesn't solve my problem."
+    4. Drill down on the SAME TOPIC for at least 2-3 turns.
+    5. ONLY move to a new objection when the agent has truly won the argument.
+    6. If you change topics, explicitly say: "Okay, fair point. You convinced me on that. But what about [New Topic]?"
+    
+    Always output JSON.
     """
 
     # --- STEP 1: START BUTTON ---
@@ -337,7 +339,7 @@ if mode == "Roleplay as Realtor":
         
         # Finish Button
         if st.button("🛑 Finish & Grade Session"):
-            st.session_state.turn_count = 11 # Force end logic
+            st.session_state.turn_count = 11
             st.rerun()
 
         if audio_input and st.session_state.roleplay_active and st.session_state.turn_count <= 10:
@@ -362,19 +364,20 @@ if mode == "Roleplay as Realtor":
                 
                 history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                 
-                # --- UPDATED PROMPT: STAY ON TARGET ---
+                # --- DRILL DOWN PROMPT ---
                 user_turn_prompt = f"""
                 HISTORY SO FAR:
                 {history_context}
                 
                 INSTRUCTIONS:
-                1. EVALUATE: Did they handle your previous objection well?
-                   - IF YES: Say "Okay, that's fair." -> THEN switch to a NEW random objection.
-                   - IF NO/WEAK: STAY on the same objection. Challenge them. "I don't think you heard me..."
-                2. Output JSON:
+                1. Listen to the Agent's response.
+                2. DECISION: Did they kill the objection perfectly?
+                   - IF NO: Push back! Say "I'm not sure..." or "That sounds like a sales script." (STAY ON TOPIC).
+                   - IF YES: Say "Okay, good answer." AND THEN switch to a new objection.
+                3. Output JSON:
                 {{
                     "response_text": "Spoken response",
-                    "strategy_tip": "Tip for the NEXT turn (or correction for this one).",
+                    "strategy_tip": "Tip for the NEXT turn.",
                     "suggested_response": "The PERFECT script they should have used."
                 }}
                 """
