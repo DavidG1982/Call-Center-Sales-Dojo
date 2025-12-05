@@ -36,7 +36,43 @@ if "roleplay_active" not in st.session_state:
     st.session_state.roleplay_active = True
 
 # ==========================================
-# 2. GOOGLE DRIVE HELPER FUNCTIONS
+# 2. DEBUG: CHECK AVAILABLE MODELS
+# ==========================================
+def get_valid_model_name():
+    """Checks which models are available to this API Key."""
+    try:
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        # Priority list of models we want to use
+        preferred_order = [
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-pro",
+            "models/gemini-1.0-pro",
+            "models/gemini-pro"
+        ]
+        
+        # Return the first one that exists
+        for model in preferred_order:
+            if model in available_models:
+                return model
+                
+        # Fallback: just return the first available one
+        if available_models:
+            return available_models[0]
+            
+        return None
+    except Exception as e:
+        st.sidebar.error(f"API Key Error: {e}")
+        return None
+
+# Determine the best model dynamically
+active_model_name = get_valid_model_name()
+
+# ==========================================
+# 3. GOOGLE DRIVE HELPER FUNCTIONS
 # ==========================================
 
 @st.cache_resource
@@ -98,7 +134,7 @@ def load_knowledge_base_from_drive(folder_id):
     return full_text, file_list_summary
 
 # ==========================================
-# 3. APP LOGIC
+# 4. APP LOGIC
 # ==========================================
 
 # LOAD KB FROM DRIVE
@@ -140,10 +176,18 @@ def save_scorecard(agent_name, score, feedback):
         st.error(f"Failed to save score: {e}")
 
 # ==========================================
-# 4. SIDEBAR
+# 5. SIDEBAR
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
+    
+    # DEBUG INFO
+    if active_model_name:
+        st.success(f"🟢 Connected to Brain: {active_model_name}")
+    else:
+        st.error("🔴 API Key Invalid or No Models Found")
+        st.info("Check your API Key in Google AI Studio.")
+    
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
     st.divider()
@@ -177,7 +221,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. MODE 1: ROLEPLAY AS REALTOR
+# 6. MODE 1: ROLEPLAY AS REALTOR
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
@@ -185,6 +229,10 @@ if mode == "Roleplay as Realtor":
     
     if not agent_name:
         st.warning("Please enter your Agent Name in the sidebar to begin.")
+        st.stop()
+
+    if not active_model_name:
+        st.error("⚠️ AI Brain not connected. Check Sidebar for errors.")
         st.stop()
 
     if not kb_text:
@@ -201,8 +249,8 @@ if mode == "Roleplay as Realtor":
             with st.spinner("The Buyer is thinking..."):
                 audio_bytes = audio_input.read()
                 
-                # CHANGED BACK TO FLASH (Most Stable)
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                # USE DYNAMICALLY FOUND MODEL
+                model = genai.GenerativeModel(active_model_name)
                 
                 context_safe = kb_text[:900000] 
                 
@@ -269,7 +317,7 @@ if mode == "Roleplay as Realtor":
         st.header("🏁 Session Over!")
         
         with st.spinner("Grading your performance..."):
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel(active_model_name)
             grading_prompt = f"""
             Review this sales call based on the Training Material.
             
@@ -299,7 +347,7 @@ if mode == "Roleplay as Realtor":
                 save_scorecard(agent_name, final_score, final_feedback)
 
 # ==========================================
-# 6. MODE 2: ROLEPLAY AS HOMEBUYER
+# 7. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
@@ -308,9 +356,13 @@ elif mode == "Roleplay as Homebuyer":
     audio_input_mc = st.audio_input("State your objection")
     
     if audio_input_mc and kb_text:
+        if not active_model_name:
+            st.error("AI Brain disconnected.")
+            st.stop()
+
         with st.spinner("Formulating perfect rebuttal..."):
             audio_bytes_mc = audio_input_mc.read()
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel(active_model_name)
             
             system_prompt_mc = f"""
             You are the PERFECT REALTOR based on the training books provided.
