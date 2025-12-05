@@ -25,7 +25,7 @@ if not all(k in st.secrets for k in required_secrets):
     st.stop()
 
 # Configure Gemini
-# We use the specific version 'gemini-1.5-flash-001' to avoid 404 errors with aliases
+# Switched to 'gemini-1.5-pro' for higher intelligence and better availability
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # Initialize Session State
@@ -171,7 +171,6 @@ with st.sidebar:
         index=0
     )
     
-    # RENAMED MODES HERE
     mode = st.radio("Select Training Mode", ["Roleplay as Realtor", "Roleplay as Homebuyer"])
     
     if st.button("Reset Session"):
@@ -181,7 +180,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. MODE 1: ROLEPLAY AS REALTOR (FORMERLY GAUNTLET)
+# 5. MODE 1: ROLEPLAY AS REALTOR
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
@@ -205,12 +204,12 @@ if mode == "Roleplay as Realtor":
             with st.spinner("The Buyer is thinking..."):
                 audio_bytes = audio_input.read()
                 
-                # UPDATED MODEL NAME TO FIX 404 ERROR
-                model = genai.GenerativeModel("gemini-1.5-flash-001")
+                # CHANGED TO GEMINI 1.5 PRO (Smarter & More Stable than Flash)
+                model = genai.GenerativeModel("gemini-1.5-pro")
                 
-                context_safe = kb_text[:800000] 
+                # Limit context for Pro model just to be safe (though Pro handles 1M+ tokens)
+                context_safe = kb_text[:900000] 
                 
-                # UPDATED SYSTEM PROMPT WITH 120 QUESTIONS LOGIC & SUGGESTED RESPONSE
                 system_prompt = f"""
                 You are a SKEPTICAL HOME BUYER. The user is a Realtor/ISA.
                 
@@ -257,7 +256,6 @@ if mode == "Roleplay as Realtor":
                         play_audio_autoplay(tts_audio)
                     with col2:
                         st.markdown("### 🧠 Live Coaching")
-                        # SHOW THE "RIGHT ANSWER"
                         with st.expander("💡 See Suggested Answer", expanded=True):
                             st.success(f"**What you should have said:**\n\n{better_response}")
                         
@@ -275,7 +273,7 @@ if mode == "Roleplay as Realtor":
         st.header("🏁 Session Over!")
         
         with st.spinner("Grading your performance..."):
-            model = genai.GenerativeModel("gemini-1.5-flash-001")
+            model = genai.GenerativeModel("gemini-1.5-pro")
             grading_prompt = f"""
             Review this sales call based on the Training Material.
             
@@ -305,7 +303,7 @@ if mode == "Roleplay as Realtor":
                 save_scorecard(agent_name, final_score, final_feedback)
 
 # ==========================================
-# 6. MODE 2: ROLEPLAY AS HOMEBUYER (FORMERLY MASTERCLASS)
+# 6. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
@@ -316,13 +314,13 @@ elif mode == "Roleplay as Homebuyer":
     if audio_input_mc and kb_text:
         with st.spinner("Formulating perfect rebuttal..."):
             audio_bytes_mc = audio_input_mc.read()
-            model = genai.GenerativeModel("gemini-1.5-flash-001")
+            model = genai.GenerativeModel("gemini-1.5-pro")
             
             system_prompt_mc = f"""
             You are the PERFECT REALTOR based on the training books provided.
             
             CONTEXT BOOKS:
-            {kb_text[:800000]}
+            {kb_text[:900000]}
             
             INSTRUCTIONS:
             1. Handle the objection perfectly based on the text provided.
@@ -343,13 +341,4 @@ elif mode == "Roleplay as Homebuyer":
                 rebuttal = resp_json_mc["rebuttal_text"]
                 explanation = resp_json_mc["why_it_works"]
                 
-                tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
-                
-                st.success(f"**Agent Rebuttal:** {rebuttal}")
-                play_audio_autoplay(tts_audio_mc)
-                
-                with st.expander("Why this works (Training Note)", expanded=True):
-                    st.write(explanation)
-                    
-            except Exception as e:
-                st.error(f"Error: {e}")
+                tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice
