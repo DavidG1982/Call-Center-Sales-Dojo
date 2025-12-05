@@ -51,12 +51,8 @@ if "active_model" not in st.session_state:
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_best_model_name():
-    """Finds the best available Gemini model for this API key."""
     try:
-        # Get list of models available to this key
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Priority list (Newest/Fastest first)
         preferences = [
             "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-001",
@@ -64,21 +60,15 @@ def get_best_model_name():
             "models/gemini-1.5-pro",
             "models/gemini-pro"
         ]
-        
-        # Check preferences against available models
         for pref in preferences:
             if pref in models:
                 return pref
-        
-        # Fallback: take the first one available
         if models:
             return models[0]
-            
-        return "models/gemini-1.5-flash" # Absolute fallback
+        return "models/gemini-1.5-flash"
     except Exception:
         return "models/gemini-1.5-flash"
 
-# Load the model name once
 if not st.session_state.active_model:
     st.session_state.active_model = get_best_model_name()
 
@@ -93,7 +83,6 @@ def get_drive_service():
             service_account_info,
             scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
-        # cache_discovery=False fixes the SSL/Wrong Version error
         return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         st.error(f"Failed to connect to Google Drive: {e}")
@@ -158,6 +147,18 @@ def play_audio_autoplay(audio_bytes):
             """
         st.markdown(md, unsafe_allow_html=True)
 
+# --- INITIALIZE KB ---
+if not st.session_state.kb_text:
+    folder_id = st.secrets["drive"]["folder_id"]
+    with st.spinner("Loading Training Materials from Drive..."):
+        text, files = load_knowledge_base_from_drive(folder_id)
+        if text:
+            st.session_state.kb_text = text
+            st.session_state.file_names = files
+        else:
+            st.session_state.kb_text = ""
+            st.session_state.file_names = []
+
 # --- GRADING LOGIC ---
 def calculate_final_grade_and_save(agent_name, kb_context):
     try:
@@ -173,12 +174,13 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         {transcript}
         
         INSTRUCTIONS:
-        1. Give a STRICT Score (0-10).
-           - 0-4: If they missed the point, stayed silent, or gave weak answers.
-           - 5-8: Good effort but missed key phrases.
-           - 9-10: Perfect execution.
-        2. Identify specific strengths and weaknesses.
-        3. Provide the exact "Magic Words" they should have used.
+        1. Grade the agent on how they handled the ONE specific objection discussed.
+        2. Give a STRICT Score (0-10).
+           - 0-4: Weak, evasive, or robotic.
+           - 5-8: Good logic, but wrong tone/phrasing.
+           - 9-10: Perfect mastery of the objection.
+        3. Identify specific strengths and weaknesses.
+        4. Provide the exact "Magic Words" they should have used.
         
         OUTPUT JSON:
         {{
@@ -188,7 +190,6 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         }}
         """
         
-        # Use the auto-detected model
         model = genai.GenerativeModel(st.session_state.active_model)
         response = model.generate_content(
             coach_prompt,
@@ -220,15 +221,11 @@ def calculate_final_grade_and_save(agent_name, kb_context):
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
-    if st.session_state.active_model:
-        st.success(f"🟢 Connected: {st.session_state.active_model}")
-    else:
-        st.warning("⚠️ Connecting...")
+    st.success("🟢 System Ready")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
-    # MANUAL LOAD BUTTON
-    if st.button("📂 Load Training Data"):
+    if st.button("📂 Reload Training Data"):
         folder_id = st.secrets["drive"]["folder_id"]
         with st.spinner("Connecting to Drive..."):
             text, files = load_knowledge_base_from_drive(folder_id)
@@ -266,24 +263,19 @@ with st.sidebar:
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
     st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**.")
-    st.caption("OBJECTIVE: Handle ONE objection perfectly. You have 3 attempts.")
+    st.info("🎯 FOCUS: Master ONE objection per session. No time limit.")
     
     if not agent_name:
         st.warning("Enter Agent Name in sidebar.")
         st.stop()
         
     if not st.session_state.kb_text:
-        st.info("👈 Please click 'Load Training Data' in the sidebar to begin.")
+        st.info("👈 Please click 'Reload Training Data' in the sidebar if empty.")
         st.stop()
-
-    # Progress Bar
-    display_turn = min(st.session_state.turn_count, 3)
-    prog_value = min(display_turn / 3.0, 1.0)
-    st.progress(prog_value, text=f"Attempt {display_turn}/3")
 
     context_safe = st.session_state.kb_text[:500000]
     
-    # --- STUBBORN PERSONA ---
+    # --- DEEP DIVE PERSONA ---
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER.
     
@@ -291,31 +283,29 @@ if mode == "Roleplay as Realtor":
     {context_safe}
     
     INSTRUCTIONS:
-    1. Start with ONE random objection.
-    2. STAY ON THIS OBJECTION. Do NOT change the topic.
-    3. BE STUBBORN. If the agent's answer is generic, push back. Say "I hear you, but..."
-    4. IMPORTANT: If the agent asks for permission (e.g., "Can I share a perspective?", "Can I ask a question?"), YOU MUST SAY "YES".
-       - Do NOT say "I hear you but..." to a permission question.
-       - Say: "Sure, go ahead." or "Okay, what is it?"
-    5. Always output JSON.
+    1. Start with ONE random objection from the text.
+    2. STAY ON THIS EXACT OBJECTION for the entire session. Do NOT switch topics.
+    3. If the agent gives a weak answer, push back hard. Say "I hear you, but..."
+    4. If the agent asks "Can I share a perspective?", ALWAYS say "Yes, go ahead."
+    5. If the agent handles it perfectly, acknowledge it: "Okay, that actually makes sense." BUT do not offer a new objection. Just let them know they won.
+    6. Always output JSON.
     """
 
     # --- START ---
     if not st.session_state.session_started:
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
-            with st.spinner("Buyer is selecting a random objection..."):
+            with st.spinner("Buyer is selecting an objection..."):
                 try:
-                    # Use the auto-detected model
                     model = genai.GenerativeModel(
                         st.session_state.active_model,
                         system_instruction=system_persona
                     )
                     
                     init_prompt = ["""
-                    Start the conversation. Pick one random objection from the context and say it to the agent.
+                    Pick ONE random objection from the context. State it clearly.
                     Output JSON: {
-                        "response_text": "The objection you say",
-                        "strategy_tip": "One concise tip on how the agent should handle this specific objection."
+                        "response_text": "The objection",
+                        "strategy_tip": "Tip on how to handle this specific objection."
                     }
                     """]
                     
@@ -351,16 +341,16 @@ if mode == "Roleplay as Realtor":
         if st.session_state.current_tip:
             st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
-        # DYNAMIC KEY FIX
+        # Unique key for every turn prevents loop
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
         
         # Finish Button
         if st.button("🛑 Finish & Grade Session"):
-            st.session_state.turn_count = 4 # Force end
+            st.session_state.roleplay_active = False # Trigger grading
             st.rerun()
 
-        if audio_input and st.session_state.roleplay_active and st.session_state.turn_count <= 3:
+        if audio_input and st.session_state.roleplay_active:
              with st.spinner("The Buyer is thinking..."):
                 
                 audio_input.seek(0)
@@ -370,6 +360,7 @@ if mode == "Roleplay as Realtor":
                     st.error("No audio captured.")
                     st.stop()
                 
+                # Format check
                 if audio_bytes[:4].startswith(b'RIFF'):
                     mime_type = "audio/wav"
                 else:
@@ -388,15 +379,14 @@ if mode == "Roleplay as Realtor":
                 
                 INSTRUCTIONS:
                 1. Listen to the Agent.
-                2. DECISION:
-                   - IF they asked permission ("Can I...?", "May I...?"): Say "Yes" or "Go ahead."
-                   - IF they offered a solution: Critique it. Is it perfect?
-                     - YES: "Okay, I see your point. [End of objection]"
-                     - NO/WEAK: "I still don't see how that helps me." (STAY ON TOPIC)
-                3. Output JSON:
+                2. CHECK PERMISSION: If they ask "Can I...?", say "Yes, go ahead."
+                3. EVALUATE: 
+                   - If the answer is WEAK: Push back. "I'm still worried about [Objection]."
+                   - If the answer is PERFECT: Say "Okay, I see your point. That helps." (Do NOT switch topics).
+                4. Output JSON:
                 {{
                     "response_text": "Spoken response",
-                    "strategy_tip": "Tip for the NEXT turn.",
+                    "strategy_tip": "Tip for the next response.",
                     "suggested_response": "The PERFECT script they should have used."
                 }}
                 """
@@ -426,26 +416,31 @@ if mode == "Roleplay as Realtor":
                     st.error(f"AI Error: {e}")
 
     # --- FINAL GRADING ---
-    if st.session_state.turn_count > 3:
+    if not st.session_state.roleplay_active:
         st.divider()
         st.header("🏁 Session Complete")
         
-        if st.session_state.roleplay_active:
+        # We use a flag to prevent double-grading on rerun
+        if "graded" not in st.session_state:
             with st.spinner("👨‍🏫 The Master Coach is grading your performance..."):
                 score, feedback = calculate_final_grade_and_save(agent_name, st.session_state.kb_text)
-                st.session_state.roleplay_active = False 
+                st.session_state.graded = True
+                st.session_state.final_score = score
+                st.session_state.final_feedback = feedback
+        
+        if "final_score" in st.session_state:
+            score = st.session_state.final_score
+            if score >= 8:
+                st.balloons()
+                color = "green"
+            elif score >= 5:
+                color = "orange"
+            else:
+                color = "red"
                 
-                if score >= 8:
-                    st.balloons()
-                    color = "green"
-                elif score >= 5:
-                    color = "orange"
-                else:
-                    color = "red"
-                    
-                st.markdown(f"## Final Score: :{color}[{score}/10]")
-                st.info(f"**Coach's Feedback:**\n\n{feedback}")
-                st.success("✅ Results saved to Google Sheets.")
+            st.markdown(f"## Final Score: :{color}[{score}/10]")
+            st.info(f"**Coach's Feedback:**\n\n{st.session_state.final_feedback}")
+            st.success("✅ Results saved to Google Sheets.")
 
 # ==========================================
 # 6. MODE 2: ROLEPLAY AS HOMEBUYER
@@ -454,10 +449,6 @@ elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
     st.markdown("You act as the **Buyer**. Throw objections!")
     
-    if not st.session_state.kb_text:
-        st.info("👈 Please click 'Load Training Data' in the sidebar to begin.")
-        st.stop()
-
     context_safe_mc = st.session_state.kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
@@ -465,7 +456,6 @@ elif mode == "Roleplay as Homebuyer":
     Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
-    # Dynamic Key for MC mode
     audio_key_mc = f"mc_rec_{st.session_state.turn_count}"
     audio_input_mc = st.audio_input("State your objection", key=audio_key_mc)
     
@@ -500,7 +490,6 @@ elif mode == "Roleplay as Homebuyer":
                 with st.expander("Why this works"):
                     st.write(explanation)
                 
-                # Increment to refresh widget
                 st.session_state.turn_count += 1
                 st.rerun()
 
