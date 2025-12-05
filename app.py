@@ -50,12 +50,17 @@ if "file_names" not in st.session_state:
 @st.cache_resource
 def get_drive_service():
     try:
-        service_account_info = st.secrets["connections"]["gsheets"]
+        # Convert secrets to a standard dict to avoid type issues
+        service_account_info = dict(st.secrets["connections"]["gsheets"])
+        
+        # Create Credentials
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
-        return build('drive', 'v3', credentials=creds)
+        
+        # FIX: cache_discovery=False prevents the SSL/Wrong Version error
+        return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         st.error(f"Failed to connect to Google Drive: {e}")
         return None
