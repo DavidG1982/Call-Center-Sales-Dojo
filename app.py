@@ -41,7 +41,7 @@ if "current_tip" not in st.session_state:
     st.session_state.current_tip = None
 if "active_model" not in st.session_state:
     st.session_state.active_model = None
-# NEW: Store KB in session to prevent "Empty" errors
+# Prevent KB reload loop
 if "kb_text" not in st.session_state:
     st.session_state.kb_text = ""
 if "file_names" not in st.session_state:
@@ -134,9 +134,8 @@ def load_knowledge_base_from_drive(folder_id):
     return full_text, file_list_summary
 
 # ==========================================
-# 4. INITIALIZE KB (FIXED)
+# 4. INITIALIZE KB
 # ==========================================
-# Only load if empty. This prevents re-loading on every button click.
 if not st.session_state.kb_text:
     folder_id = st.secrets["drive"]["folder_id"]
     with st.spinner("Loading Training Materials from Drive..."):
@@ -145,7 +144,6 @@ if not st.session_state.kb_text:
             st.session_state.kb_text = text
             st.session_state.file_names = files
         else:
-            # If load failed, don't crash, just show warning
             st.session_state.kb_text = ""
             st.session_state.file_names = []
 
@@ -244,7 +242,7 @@ with st.sidebar:
     else:
         st.warning("⚠️ No Files Loaded")
         if st.button("🔄 Force Reload Drive"):
-            st.session_state.kb_text = "" # Clear to force reload
+            st.session_state.kb_text = ""
             st.rerun()
     
     voice_option = st.selectbox(
@@ -279,13 +277,15 @@ if mode == "Roleplay as Realtor":
         st.error("Knowledge Base Empty. Please click 'Force Reload Drive' in sidebar.")
         st.stop()
 
-    # Progress: 3 Turns Max
-    prog_value = min(st.session_state.turn_count / 3, 1.0)
-    st.progress(prog_value, text=f"Turn {st.session_state.turn_count}/3")
+    # Progress: Safety Clamp and Visualization
+    # Only show up to turn 3.
+    display_turn = min(st.session_state.turn_count, 3)
+    prog_value = min(display_turn / 3, 1.0)
+    st.progress(prog_value, text=f"Turn {display_turn}/3")
 
     context_safe = st.session_state.kb_text[:500000]
     
-    # --- UPDATED "ALLOW PERMISSION" PERSONA ---
+    # --- STUBBORN PERSONA ---
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER.
     
@@ -352,80 +352,84 @@ if mode == "Roleplay as Realtor":
             else:
                 st.write(f"**You:** {msg['content']}")
 
-        if st.session_state.current_tip:
-            st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
+        if st.session_state.turn_count <= 3:
+            if st.session_state.current_tip:
+                st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
-        audio_input = st.audio_input("Record your response")
-        
-        # Finish Button
-        if st.button("🛑 Finish & Grade Session"):
-            st.session_state.turn_count = 4 # Force end
-            st.rerun()
+            # --- CRITICAL FIX: DYNAMIC KEY TO PREVENT LOOP ---
+            # We add the turn_count to the key. This forces a fresh widget every turn.
+            audio_key = f"rec_{st.session_state.turn_count}"
+            audio_input = st.audio_input("Record your response", key=audio_key)
+            
+            # Finish Button
+            if st.button("🛑 Finish & Grade Session"):
+                st.session_state.turn_count = 4 # Force end
+                st.rerun()
 
-        if audio_input and st.session_state.roleplay_active and st.session_state.turn_count <= 3:
-             with st.spinner("The Buyer is thinking..."):
-                
-                audio_input.seek(0)
-                audio_bytes = audio_input.read()
-                
-                if len(audio_bytes) < 100:
-                    st.error("No audio captured.")
-                    st.stop()
-                
-                if audio_bytes[:4].startswith(b'RIFF'):
-                    mime_type = "audio/wav"
-                else:
-                    mime_type = "audio/webm"
-                
-                model = genai.GenerativeModel(
-                    st.session_state.active_model,
-                    system_instruction=system_persona
-                )
-                
-                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-                
-                user_turn_prompt = f"""
-                HISTORY SO FAR:
-                {history_context}
-                
-                INSTRUCTIONS:
-                1. Listen to the Agent.
-                2. DECISION:
-                   - IF they asked permission ("Can I...?", "May I...?"): Say "Yes" or "Go ahead."
-                   - IF they explained a perspective/solution: Judge it.
-                     - If good: "Okay, that makes sense. I can see that."
-                     - If bad/evasive: "That doesn't help me with [Objection]."
-                3. Output JSON:
-                {{
-                    "response_text": "Spoken response",
-                    "strategy_tip": "Tip for the NEXT turn.",
-                    "suggested_response": "The PERFECT script they should have used."
-                }}
-                """
-                
-                try:
-                    response = model.generate_content(
-                        [user_turn_prompt, {"mime_type": mime_type, "data": audio_bytes}],
-                        generation_config={"response_mime_type": "application/json"}
+            if audio_input and st.session_state.roleplay_active:
+                 with st.spinner("The Buyer is thinking..."):
+                    
+                    audio_input.seek(0)
+                    audio_bytes = audio_input.read()
+                    
+                    if len(audio_bytes) < 100:
+                        st.error("No audio captured.")
+                        st.stop()
+                    
+                    if audio_bytes[:4].startswith(b'RIFF'):
+                        mime_type = "audio/wav"
+                    else:
+                        mime_type = "audio/webm"
+                    
+                    model = genai.GenerativeModel(
+                        st.session_state.active_model,
+                        system_instruction=system_persona
                     )
                     
-                    response_json = json.loads(response.text)
-                    ai_text = response_json.get("response_text", "")
+                    history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                     
-                    st.session_state.current_tip = response_json.get("strategy_tip", "")
-                    better_response = response_json.get("suggested_response", "")
+                    user_turn_prompt = f"""
+                    HISTORY SO FAR:
+                    {history_context}
                     
-                    tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                    INSTRUCTIONS:
+                    1. Listen to the Agent.
+                    2. DECISION:
+                       - IF they asked permission ("Can I...?", "May I...?"): Say "Yes" or "Go ahead."
+                       - IF they explained a perspective/solution: Judge it.
+                         - If good: "Okay, that makes sense. I can see that."
+                         - If bad/evasive: "That doesn't help me with [Objection]."
+                    3. Output JSON:
+                    {{
+                        "response_text": "Spoken response",
+                        "strategy_tip": "Tip for the NEXT turn.",
+                        "suggested_response": "The PERFECT script they should have used."
+                    }}
+                    """
                     
-                    st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
-                    st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
-                    st.session_state.turn_count += 1
-                    
-                    play_audio_autoplay(tts_audio)
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"AI Error: {e}")
+                    try:
+                        response = model.generate_content(
+                            [user_turn_prompt, {"mime_type": mime_type, "data": audio_bytes}],
+                            generation_config={"response_mime_type": "application/json"}
+                        )
+                        
+                        response_json = json.loads(response.text)
+                        ai_text = response_json.get("response_text", "")
+                        
+                        st.session_state.current_tip = response_json.get("strategy_tip", "")
+                        better_response = response_json.get("suggested_response", "")
+                        
+                        tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                        
+                        st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
+                        st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
+                        st.session_state.turn_count += 1
+                        
+                        play_audio_autoplay(tts_audio)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
 
     # --- STEP 3: FINAL GRADING ---
     if st.session_state.turn_count > 3:
@@ -467,7 +471,7 @@ elif mode == "Roleplay as Homebuyer":
     Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
-    audio_input_mc = st.audio_input("State your objection")
+    audio_input_mc = st.audio_input("State your objection", key=f"mc_rec_{st.session_state.turn_count}")
     
     if audio_input_mc and st.session_state.kb_text:
         with st.spinner("Formulating rebuttal..."):
@@ -499,5 +503,10 @@ elif mode == "Roleplay as Homebuyer":
                 play_audio_autoplay(tts_audio_mc)
                 with st.expander("Why this works"):
                     st.write(explanation)
+                    
+                # Increment turn count just to refresh the key (avoid loop here too)
+                st.session_state.turn_count += 1
+                st.rerun()
+                
             except Exception as e:
                 st.error(f"Error: {e}")
