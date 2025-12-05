@@ -16,7 +16,7 @@ from googleapiclient.http import MediaIoBaseDownload
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Call Center Sales Dojo", layout="wide", page_icon="🥋")
+st.set_page_config(page_title="Sales Dojo", layout="wide", page_icon="🥋")
 
 # Check for Secrets
 required_secrets = ["GOOGLE_API_KEY", "drive"]
@@ -25,6 +25,7 @@ if not all(k in st.secrets for k in required_secrets):
     st.stop()
 
 # Configure Gemini
+# We use the specific version 'gemini-1.5-flash-001' to avoid 404 errors with aliases
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # Initialize Session State
@@ -32,8 +33,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "turn_count" not in st.session_state:
     st.session_state.turn_count = 0
-if "gauntlet_active" not in st.session_state:
-    st.session_state.gauntlet_active = True
+if "roleplay_active" not in st.session_state:
+    st.session_state.roleplay_active = True
 
 # ==========================================
 # 2. GOOGLE DRIVE HELPER FUNCTIONS
@@ -43,10 +44,7 @@ if "gauntlet_active" not in st.session_state:
 def get_drive_service():
     """Authenticates with Google Drive using the Service Account in secrets."""
     try:
-        # We manually construct credentials from the [connections.gsheets] secret
-        # because we need Drive Scope, not just Sheets Scope.
         service_account_info = st.secrets["connections"]["gsheets"]
-        
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=['https://www.googleapis.com/auth/drive.readonly']
@@ -56,18 +54,17 @@ def get_drive_service():
         st.error(f"Failed to connect to Google Drive: {e}")
         return None
 
-@st.cache_data(ttl=3600) # Cache for 1 hour so we don't re-download books on every click
+@st.cache_data(ttl=3600) 
 def load_knowledge_base_from_drive(folder_id):
     """Downloads all PDFs from the specific Drive folder and extracts text."""
     service = get_drive_service()
     if not service:
-        return ""
+        return "", []
     
     full_text = ""
     file_list_summary = []
 
     try:
-        # List files in the folder
         results = service.files().list(
             q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
             fields="files(id, name)"
@@ -109,10 +106,9 @@ def load_knowledge_base_from_drive(folder_id):
 
 # LOAD KB FROM DRIVE
 folder_id = st.secrets["drive"]["folder_id"]
-with st.spinner("Loading Training Books from Google Drive... (This happens once per hour)"):
+with st.spinner("Loading Training Materials..."):
     kb_text, file_names = load_knowledge_base_from_drive(folder_id)
 
-# Helper for TTS
 async def text_to_speech(text, voice):
     communicate = edge_tts.Communicate(text, voice)
     mp3_data = b""
@@ -156,8 +152,8 @@ with st.sidebar:
     st.divider()
     st.subheader("📚 Knowledge Base")
     if file_names:
-        st.success(f"Loaded {len(file_names)} Files from Drive")
-        with st.expander("View Loaded Files"):
+        st.success(f"Loaded {len(file_names)} Files")
+        with st.expander("View Files"):
             for f in file_names:
                 st.write(f"📄 {f}")
         
@@ -170,32 +166,33 @@ with st.sidebar:
     st.divider()
     st.subheader("🔊 Audio Settings")
     voice_option = st.selectbox(
-        "Buyer's Voice",
+        "AI Voice",
         ["en-US-ChristopherNeural", "en-US-JennyNeural", "en-US-GuyNeural", "en-US-AriaNeural"],
         index=0
     )
     
-    mode = st.radio("Select Mode", ["The Gauntlet (Evaluation)", "The Masterclass (Training)"])
+    # RENAMED MODES HERE
+    mode = st.radio("Select Training Mode", ["Roleplay as Realtor", "Roleplay as Homebuyer"])
     
     if st.button("Reset Session"):
         st.session_state.chat_history = []
         st.session_state.turn_count = 0
-        st.session_state.gauntlet_active = True
+        st.session_state.roleplay_active = True
         st.rerun()
 
 # ==========================================
-# 5. MODE 1: THE GAUNTLET
+# 5. MODE 1: ROLEPLAY AS REALTOR (FORMERLY GAUNTLET)
 # ==========================================
-if mode == "The Gauntlet (Evaluation)":
-    st.title("🔥 The Gauntlet")
-    st.markdown("Roleplay as the **Agent**. The AI is a **Skeptical Buyer**. Keep the deal alive for 10 turns!")
+if mode == "Roleplay as Realtor":
+    st.title("🏡 Roleplay as Realtor")
+    st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**. Keep the deal alive!")
     
     if not agent_name:
         st.warning("Please enter your Agent Name in the sidebar to begin.")
         st.stop()
 
     if not kb_text:
-        st.error("⚠️ Knowledge Base is empty. Add PDFs to your Google Drive folder.")
+        st.error("⚠️ Knowledge Base is empty. Add PDFs (converted from Word) to Drive.")
 
     # Progress Bar
     progress = st.session_state.turn_count / 10
@@ -203,34 +200,39 @@ if mode == "The Gauntlet (Evaluation)":
 
     audio_input = st.audio_input("Record your pitch/response")
 
-    if audio_input and st.session_state.gauntlet_active:
+    if audio_input and st.session_state.roleplay_active:
         if st.session_state.turn_count < 10:
             with st.spinner("The Buyer is thinking..."):
                 audio_bytes = audio_input.read()
-                model = genai.GenerativeModel("gemini-1.5-flash")
                 
-                # We limit context to ~1M tokens (Gemini Flash limit). 
-                # 2 books is usually fine, but we ensure we don't crash.
+                # UPDATED MODEL NAME TO FIX 404 ERROR
+                model = genai.GenerativeModel("gemini-1.5-flash-001")
+                
                 context_safe = kb_text[:800000] 
                 
+                # UPDATED SYSTEM PROMPT WITH 120 QUESTIONS LOGIC & SUGGESTED RESPONSE
                 system_prompt = f"""
-                You are a SKEPTICAL HOME BUYER. The user is a Sales Agent.
+                You are a SKEPTICAL HOME BUYER. The user is a Realtor/ISA.
                 
-                CONTEXT FROM TRAINING BOOKS:
+                CONTEXT FROM TRAINING MATERIALS (Books & Questions List):
                 {context_safe} 
                 
                 INSTRUCTIONS:
-                1. Listen to the agent.
-                2. Respond naturally as a skeptical buyer. Use the book context for specific objections/persona.
-                3. Output JSON:
+                1. The context includes a list of 120+ questions/objections.
+                2. Silently select 10 RANDOM objections from that list to use for this session.
+                3. Respond naturally as the buyer using one of those objections if it fits the flow, or make up a relevant one.
+                4. CRITICAL: In the 'suggested_response' field, write exactly what the Realtor SHOULD have said to handle your last objection perfectly.
+                
+                OUTPUT JSON:
                 {{
-                    "response_text": "Spoken response (concise)",
-                    "coach_hints": ["Hint 1", "Hint 2", "Hint 3"]
+                    "response_text": "Your spoken response as the buyer",
+                    "coach_hints": ["Hint 1 on tone", "Hint 2 on strategy"],
+                    "suggested_response": "The perfect script/rebuttal the agent SHOULD have used."
                 }}
                 """
                 
                 history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-                full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the audio."
+                full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the audio input."
 
                 try:
                     response = model.generate_content(
@@ -241,6 +243,7 @@ if mode == "The Gauntlet (Evaluation)":
                     response_json = json.loads(response.text)
                     ai_text = response_json["response_text"]
                     hints = response_json["coach_hints"]
+                    better_response = response_json.get("suggested_response", "No suggestion available.")
                     
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
                     
@@ -254,6 +257,11 @@ if mode == "The Gauntlet (Evaluation)":
                         play_audio_autoplay(tts_audio)
                     with col2:
                         st.markdown("### 🧠 Live Coaching")
+                        # SHOW THE "RIGHT ANSWER"
+                        with st.expander("💡 See Suggested Answer", expanded=True):
+                            st.success(f"**What you should have said:**\n\n{better_response}")
+                        
+                        st.write("**Tips:**")
                         for hint in hints:
                             st.caption(f"• {hint}")
                             
@@ -261,15 +269,15 @@ if mode == "The Gauntlet (Evaluation)":
                     st.error(f"AI Error: {e}")
 
     # End Game
-    if st.session_state.turn_count >= 10 and st.session_state.gauntlet_active:
-        st.session_state.gauntlet_active = False
+    if st.session_state.turn_count >= 10 and st.session_state.roleplay_active:
+        st.session_state.roleplay_active = False
         st.divider()
-        st.header("🏁 The Gauntlet is Over!")
+        st.header("🏁 Session Over!")
         
         with st.spinner("Grading your performance..."):
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-1.5-flash-001")
             grading_prompt = f"""
-            Review this sales call based on the provided Training Material.
+            Review this sales call based on the Training Material.
             
             TRAINING MATERIAL:
             {kb_text[:200000]}
@@ -280,7 +288,7 @@ if mode == "The Gauntlet (Evaluation)":
             OUTPUT JSON:
             {{
                 "score": (integer 0-10),
-                "feedback_summary": "Summary of what they did well vs missed based on the training material."
+                "feedback_summary": "Summary of performance."
             }}
             """
             
@@ -297,21 +305,21 @@ if mode == "The Gauntlet (Evaluation)":
                 save_scorecard(agent_name, final_score, final_feedback)
 
 # ==========================================
-# 6. MODE 2: THE MASTERCLASS
+# 6. MODE 2: ROLEPLAY AS HOMEBUYER (FORMERLY MASTERCLASS)
 # ==========================================
-elif mode == "The Masterclass (Training)":
-    st.title("🎓 The Masterclass")
-    st.markdown("Roleplay as the **Buyer**. Throw objections! The AI acts as the **Perfect Agent** using the Books.")
+elif mode == "Roleplay as Homebuyer":
+    st.title("🎓 Roleplay as Homebuyer")
+    st.markdown("You act as the **Buyer**. Throw objections! The AI acts as the **Perfect Realtor** using the Books.")
     
     audio_input_mc = st.audio_input("State your objection")
     
     if audio_input_mc and kb_text:
         with st.spinner("Formulating perfect rebuttal..."):
             audio_bytes_mc = audio_input_mc.read()
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-1.5-flash-001")
             
             system_prompt_mc = f"""
-            You are the PERFECT CALL CENTER AGENT based on the training books provided.
+            You are the PERFECT REALTOR based on the training books provided.
             
             CONTEXT BOOKS:
             {kb_text[:800000]}
