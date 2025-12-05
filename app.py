@@ -39,7 +39,6 @@ if "session_started" not in st.session_state:
     st.session_state.session_started = False
 if "current_tip" not in st.session_state:
     st.session_state.current_tip = None
-# Prevent KB reload loop
 if "kb_text" not in st.session_state:
     st.session_state.kb_text = ""
 if "file_names" not in st.session_state:
@@ -100,20 +99,6 @@ def load_knowledge_base_from_drive(folder_id):
 
     return full_text, file_list_summary
 
-# ==========================================
-# 3. INITIALIZE KB
-# ==========================================
-if not st.session_state.kb_text:
-    folder_id = st.secrets["drive"]["folder_id"]
-    with st.spinner("Loading Training Materials from Drive..."):
-        text, files = load_knowledge_base_from_drive(folder_id)
-        if text:
-            st.session_state.kb_text = text
-            st.session_state.file_names = files
-        else:
-            st.session_state.kb_text = ""
-            st.session_state.file_names = []
-
 async def text_to_speech(text, voice):
     try:
         communicate = edge_tts.Communicate(text, voice)
@@ -135,7 +120,7 @@ def play_audio_autoplay(audio_bytes):
             """
         st.markdown(md, unsafe_allow_html=True)
 
-# --- HARSH GRADING ENGINE ---
+# --- GRADING LOGIC ---
 def calculate_final_grade_and_save(agent_name, kb_context):
     try:
         transcript = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
@@ -151,9 +136,9 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         
         INSTRUCTIONS:
         1. Give a STRICT Score (0-10).
-           - 0-4: If they missed the point, stayed silent, or gave weak one-word answers.
+           - 0-4: If they missed the point, stayed silent, or gave weak answers.
            - 5-8: Good effort but missed key phrases.
-           - 9-10: Perfect execution of the "Perspective" close.
+           - 9-10: Perfect execution.
         2. Identify specific strengths and weaknesses.
         3. Provide the exact "Magic Words" they should have used.
         
@@ -165,7 +150,6 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         }}
         """
         
-        # Use default flash model for grading
         model = genai.GenerativeModel("models/gemini-1.5-flash")
         response = model.generate_content(
             coach_prompt,
@@ -193,21 +177,30 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         return 0, f"Error generating grade: {e}"
 
 # ==========================================
-# 4. SIDEBAR
+# 3. SIDEBAR
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
-    st.success("🟢 AI Connected")
+    st.success("🟢 System Ready")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
+    # MANUAL LOAD BUTTON (Fixes Startup Crash)
+    if st.button("📂 Load Training Data"):
+        folder_id = st.secrets["drive"]["folder_id"]
+        with st.spinner("Connecting to Drive..."):
+            text, files = load_knowledge_base_from_drive(folder_id)
+            if text:
+                st.session_state.kb_text = text
+                st.session_state.file_names = files
+                st.rerun()
+            else:
+                st.error("Could not load files.")
+
     if st.session_state.file_names:
         st.info(f"📚 {len(st.session_state.file_names)} Files Loaded")
     else:
-        st.warning("⚠️ No Files Loaded")
-        if st.button("🔄 Force Reload Drive"):
-            st.session_state.kb_text = ""
-            st.rerun()
+        st.warning("⚠️ No Data Loaded")
     
     voice_option = st.selectbox(
         "AI Voice",
@@ -226,7 +219,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. MODE 1: ROLEPLAY AS REALTOR
+# 4. MODE 1: ROLEPLAY AS REALTOR
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
@@ -238,12 +231,12 @@ if mode == "Roleplay as Realtor":
         st.stop()
         
     if not st.session_state.kb_text:
-        st.error("Knowledge Base Empty. Please click 'Force Reload Drive' in sidebar.")
+        st.info("👈 Please click 'Load Training Data' in the sidebar to begin.")
         st.stop()
 
-    # Progress Bar (Clamped)
+    # Progress Bar (Clamped to 100% to prevent crash)
     display_turn = min(st.session_state.turn_count, 3)
-    prog_value = min(display_turn / 3, 1.0)
+    prog_value = min(display_turn / 3.0, 1.0)
     st.progress(prog_value, text=f"Attempt {display_turn}/3")
 
     context_safe = st.session_state.kb_text[:500000]
@@ -270,7 +263,7 @@ if mode == "Roleplay as Realtor":
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
                 try:
-                    # Default Model
+                    # Hardcoded Model for Stability
                     model = genai.GenerativeModel(
                         "models/gemini-1.5-flash",
                         system_instruction=system_persona
@@ -413,12 +406,16 @@ if mode == "Roleplay as Realtor":
                 st.success("✅ Results saved to Google Sheets.")
 
 # ==========================================
-# 6. MODE 2: ROLEPLAY AS HOMEBUYER
+# 5. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
     st.markdown("You act as the **Buyer**. Throw objections!")
     
+    if not st.session_state.kb_text:
+        st.info("👈 Please click 'Load Training Data' in the sidebar to begin.")
+        st.stop()
+
     context_safe_mc = st.session_state.kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
