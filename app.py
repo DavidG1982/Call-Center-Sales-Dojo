@@ -37,36 +37,32 @@ if "roleplay_active" not in st.session_state:
     st.session_state.roleplay_active = True
 if "session_started" not in st.session_state:
     st.session_state.session_started = False
-if "last_hint" not in st.session_state:
-    st.session_state.last_hint = None
+if "current_tip" not in st.session_state:
+    st.session_state.current_tip = None
 if "active_model" not in st.session_state:
     st.session_state.active_model = None
 
 # ==========================================
-# 2. ROBUST MODEL SELECTOR (THE FIX)
+# 2. ROBUST MODEL SELECTOR
 # ==========================================
 def find_best_available_model():
     """Queries the API to find a working model name."""
     try:
-        # Get list of models your key can see
         models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         model_names = [m.name for m in models]
         
-        # Preference List (Try these in order)
         preferences = [
             "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-001",
             "models/gemini-1.5-flash-latest",
             "models/gemini-1.5-pro",
-            "models/gemini-1.5-pro-001",
-            "models/gemini-pro" # Fallback to older model if necessary
+            "models/gemini-pro"
         ]
         
         for pref in preferences:
             if pref in model_names:
                 return pref
         
-        # If none of our preferences exist, take the first available one
         if model_names:
             return model_names[0]
             
@@ -74,7 +70,6 @@ def find_best_available_model():
     except Exception as e:
         return None
 
-# Find the model ONCE and save it
 if not st.session_state.active_model:
     st.session_state.active_model = find_best_available_model()
 
@@ -183,11 +178,10 @@ def save_scorecard(agent_name, score, feedback):
 with st.sidebar:
     st.title("🥋 Dojo Settings")
     
-    # DEBUG INFO FOR MODEL
     if st.session_state.active_model:
         st.success(f"🟢 Connected: {st.session_state.active_model}")
     else:
-        st.error("🔴 No AI Models Found. Check API Key permissions.")
+        st.error("🔴 No AI Models Found. Check API Key.")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
@@ -207,7 +201,7 @@ with st.sidebar:
         st.session_state.turn_count = 0
         st.session_state.roleplay_active = True
         st.session_state.session_started = False
-        st.session_state.last_hint = None
+        st.session_state.current_tip = None
         st.rerun()
 
 # ==========================================
@@ -224,15 +218,11 @@ if mode == "Roleplay as Realtor":
     if not kb_text:
         st.error("Knowledge Base Empty.")
         st.stop()
-        
-    if not st.session_state.active_model:
-        st.error("AI Brain not connected.")
-        st.stop()
 
     progress = st.session_state.turn_count / 10
     st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
 
-    # Limit context to avoid 429 Errors
+    # Limit context for safety
     context_safe = kb_text[:500000]
     
     system_persona = f"""
@@ -253,13 +243,18 @@ if mode == "Roleplay as Realtor":
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
                 try:
-                    # Initialize Model
                     model = genai.GenerativeModel(
                         st.session_state.active_model,
                         system_instruction=system_persona
                     )
                     
-                    init_prompt = ["Start the conversation. Pick one random objection from the context and say it to the agent."]
+                    init_prompt = ["""
+                    Start the conversation. Pick one random objection from the context and say it to the agent.
+                    Output JSON: {
+                        "response_text": "The objection you say",
+                        "strategy_tip": "One concise tip on how the agent should handle this specific objection."
+                    }
+                    """]
                     
                     response = model.generate_content(
                         init_prompt, 
@@ -267,23 +262,22 @@ if mode == "Roleplay as Realtor":
                     )
                     
                     resp_json = json.loads(response.text)
-                    opening_line = resp_json.get("response_text", resp_json.get("text", "Hello."))
+                    opening_line = resp_json.get("response_text", "Hello.")
+                    # Capture the tip immediately
+                    st.session_state.current_tip = resp_json.get("strategy_tip", "Acknowledge and validate.")
                     
-                    # Save to history
                     st.session_state.chat_history.append({"role": "Buyer", "content": opening_line})
                     st.session_state.session_started = True
                     st.session_state.turn_count = 1
                     
-                    # Generate Audio
                     tts_audio = asyncio.run(text_to_speech(opening_line, voice_option))
                     play_audio_autoplay(tts_audio)
                     st.rerun()
                     
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
+                    # Clear model if it fails so we try finding a new one next time
                     if "404" in str(e):
-                        st.error("Model not found. Trying fallback...")
-                        # This catches the 404 and forces a re-search next run
                         st.session_state.active_model = None 
 
     # --- STEP 2: MAIN LOOP ---
@@ -295,20 +289,10 @@ if mode == "Roleplay as Realtor":
             else:
                 st.write(f"**You:** {msg['content']}")
 
-        # Hint System
-        if st.button("💡 Need a Hint?"):
-            with st.spinner("Coach is thinking..."):
-                model = genai.GenerativeModel(
-                    st.session_state.active_model,
-                    system_instruction=system_persona
-                )
-                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-                hint_req = [f"The conversation history is:\n{history_context}\n\nGive the Agent 1 short tip on how to respond to the last objection."]
-                hint_resp = model.generate_content(hint_req)
-                st.session_state.last_hint = hint_resp.text
-        
-        if st.session_state.last_hint:
-            st.warning(f"**Coach Whisper:** {st.session_state.last_hint}")
+        # --- AUTOMATIC HINT DISPLAY ---
+        # Show the tip for the *current* objection waiting to be answered
+        if st.session_state.current_tip:
+            st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
         # Audio Input
         audio_input = st.audio_input("Record your response")
@@ -317,7 +301,6 @@ if mode == "Roleplay as Realtor":
              if st.session_state.turn_count < 10:
                 with st.spinner("The Buyer is thinking..."):
                     
-                    # 1. AUTO-DETECT FORMAT
                     audio_input.seek(0)
                     audio_bytes = audio_input.read()
                     
@@ -330,7 +313,6 @@ if mode == "Roleplay as Realtor":
                     else:
                         mime_type = "audio/webm"
                     
-                    # 2. SEND TO GEMINI
                     model = genai.GenerativeModel(
                         st.session_state.active_model,
                         system_instruction=system_persona
@@ -348,8 +330,8 @@ if mode == "Roleplay as Realtor":
                     3. Output JSON:
                     {{
                         "response_text": "Spoken response",
-                        "coach_hints": ["Hint 1", "Hint 2"],
-                        "suggested_response": "The PERFECT script the agent should have used."
+                        "strategy_tip": "One concise tip on how to handle THIS new objection you just gave.",
+                        "suggested_response": "The PERFECT script the agent should have used for the previous turn."
                     }}
                     """
                     
@@ -361,15 +343,16 @@ if mode == "Roleplay as Realtor":
                         
                         response_json = json.loads(response.text)
                         ai_text = response_json.get("response_text", "")
-                        hints = response_json.get("coach_hints", [])
-                        better_response = response_json.get("suggested_response", "No suggestion.")
+                        
+                        # Update the tip for the NEXT turn
+                        st.session_state.current_tip = response_json.get("strategy_tip", "")
+                        better_response = response_json.get("suggested_response", "")
                         
                         tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
                         
                         st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
                         st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
                         st.session_state.turn_count += 1
-                        st.session_state.last_hint = None
                         
                         play_audio_autoplay(tts_audio)
                         st.rerun()
