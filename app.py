@@ -8,6 +8,8 @@ import pandas as pd
 import json
 import base64
 import io
+import os
+import tempfile
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -36,46 +38,33 @@ if "roleplay_active" not in st.session_state:
     st.session_state.roleplay_active = True
 
 # ==========================================
-# 2. DEBUG: CHECK AVAILABLE MODELS
+# 2. MODEL SELECTOR
 # ==========================================
 def get_valid_model_name():
-    """Checks which models are available to this API Key."""
     try:
-        # We manually list the most capable models in order of preference
-        # We prioritize Flash because it is fast for audio
         candidates = [
             "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-001",
             "models/gemini-1.5-pro",
-            "models/gemini-2.0-flash-exp" # Experimental newest model
+            "models/gemini-2.0-flash-exp"
         ]
-        
-        # Get actual available list from API
         my_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Find the first match
         for cand in candidates:
             if cand in my_models:
                 return cand
-        
-        # Fallback
         if my_models:
             return my_models[0]
-            
         return None
     except Exception as e:
         return None
 
-# Determine the best model dynamically
 active_model_name = get_valid_model_name()
 
 # ==========================================
 # 3. GOOGLE DRIVE HELPER FUNCTIONS
 # ==========================================
-
 @st.cache_resource
 def get_drive_service():
-    """Authenticates with Google Drive using the Service Account in secrets."""
     try:
         service_account_info = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
@@ -89,7 +78,6 @@ def get_drive_service():
 
 @st.cache_data(ttl=3600) 
 def load_knowledge_base_from_drive(folder_id):
-    """Downloads all PDFs from the specific Drive folder and extracts text."""
     service = get_drive_service()
     if not service:
         return "", []
@@ -111,20 +99,16 @@ def load_knowledge_base_from_drive(folder_id):
             request = service.files().get_media(fileId=item['id'])
             file_stream = io.BytesIO()
             downloader = MediaIoBaseDownload(file_stream, request)
-            
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
-
             file_stream.seek(0)
             pdf_reader = PyPDF2.PdfReader(file_stream)
             file_text = ""
             for page in pdf_reader.pages:
                 file_text += page.extract_text() + "\n"
-            
             full_text += f"\n\n--- SOURCE: {item['name']} ---\n{file_text}"
             file_list_summary.append(item['name'])
-            
     except Exception as e:
         st.error(f"Error reading from Drive: {e}")
         return "", []
@@ -134,8 +118,6 @@ def load_knowledge_base_from_drive(folder_id):
 # ==========================================
 # 4. APP LOGIC
 # ==========================================
-
-# LOAD KB FROM DRIVE
 folder_id = st.secrets["drive"]["folder_id"]
 with st.spinner("Loading Training Materials..."):
     kb_text, file_names = load_knowledge_base_from_drive(folder_id)
@@ -178,32 +160,16 @@ def save_scorecard(agent_name, score, feedback):
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
-    
-    # DEBUG INFO
     if active_model_name:
-        st.success(f"🟢 Connected to Brain: {active_model_name}")
+        st.success(f"🟢 Brain: {active_model_name}")
     else:
-        st.error("🔴 API Key Invalid or No Models Found")
-        st.info("Check your API Key in Google AI Studio.")
+        st.error("🔴 API Key Issue")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
-    st.divider()
-    st.subheader("📚 Knowledge Base")
     if file_names:
-        st.success(f"Loaded {len(file_names)} Files")
-        with st.expander("View Files"):
-            for f in file_names:
-                st.write(f"📄 {f}")
-        
-        if st.button("🔄 Refresh Drive Files"):
-            st.cache_data.clear()
-            st.rerun()
-    else:
-        st.warning("No PDFs found in the connected Drive Folder.")
-
-    st.divider()
-    st.subheader("🔊 Audio Settings")
+        st.info(f"📚 {len(file_names)} Training Files Loaded")
+    
     voice_option = st.selectbox(
         "AI Voice",
         ["en-US-ChristopherNeural", "en-US-JennyNeural", "en-US-GuyNeural", "en-US-AriaNeural"],
@@ -223,20 +189,15 @@ with st.sidebar:
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
-    st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**. Keep the deal alive!")
+    st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**.")
     
     if not agent_name:
-        st.warning("Please enter your Agent Name in the sidebar to begin.")
+        st.warning("Enter Agent Name in sidebar.")
         st.stop()
-
-    if not active_model_name:
-        st.error("⚠️ AI Brain not connected. Check Sidebar for errors.")
-        st.stop()
-
+        
     if not kb_text:
-        st.error("⚠️ Knowledge Base is empty. Add PDFs to Drive.")
+        st.error("Knowledge Base Empty.")
 
-    # Progress Bar
     progress = st.session_state.turn_count / 10
     st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
 
@@ -244,55 +205,54 @@ if mode == "Roleplay as Realtor":
 
     if audio_input and st.session_state.roleplay_active:
         if st.session_state.turn_count < 10:
+            
             with st.spinner("The Buyer is thinking..."):
-                
-                # CRITICAL FIX: REWIND AUDIO BUFFER
+                # 1. Save Audio to Temp File (Solves format issues)
                 audio_input.seek(0)
                 audio_bytes = audio_input.read()
                 
-                # Check for empty audio
                 if len(audio_bytes) < 100:
-                    st.error("⚠️ Audio recording failed (File too small). Please try recording again.")
+                    st.error("No audio captured.")
                     st.stop()
 
-                # USE DYNAMICALLY FOUND MODEL
-                model = genai.GenerativeModel(active_model_name)
-                
-                context_safe = kb_text[:900000] 
-                
-                system_prompt = f"""
-                You are a SKEPTICAL HOME BUYER. The user is a Realtor/ISA.
-                
-                CONTEXT FROM TRAINING MATERIALS (Books & Questions List):
-                {context_safe} 
-                
-                INSTRUCTIONS:
-                1. The context includes a list of 120+ questions/objections.
-                2. Silently select 10 RANDOM objections from that list to use for this session.
-                3. Respond naturally as the buyer using one of those objections if it fits the flow, or make up a relevant one.
-                4. CRITICAL: In the 'suggested_response' field, write exactly what the Realtor SHOULD have said to handle your last objection perfectly.
-                
-                OUTPUT JSON:
-                {{
-                    "response_text": "Your spoken response as the buyer",
-                    "coach_hints": ["Hint 1 on tone", "Hint 2 on strategy"],
-                    "suggested_response": "The perfect script/rebuttal the agent SHOULD have used."
-                }}
-                """
-                
-                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-                full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the audio input."
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                    tmp_file.write(audio_bytes)
+                    tmp_path = tmp_file.name
 
                 try:
+                    # 2. Upload to Gemini
+                    uploaded_file = genai.upload_file(tmp_path)
+                    
+                    # 3. Generate Content
+                    model = genai.GenerativeModel(active_model_name)
+                    context_safe = kb_text[:900000] 
+                    
+                    system_prompt = f"""
+                    You are a SKEPTICAL HOME BUYER. User is Realtor.
+                    CONTEXT: {context_safe}
+                    INSTRUCTIONS:
+                    1. Select 10 random objections from context.
+                    2. Respond naturally using one.
+                    3. OUTPUT JSON:
+                    {{
+                        "response_text": "Spoken response",
+                        "coach_hints": ["Hint 1", "Hint 2"],
+                        "suggested_response": "Perfect rebuttal script."
+                    }}
+                    """
+                    
+                    history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
+                    full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the attached audio."
+
                     response = model.generate_content(
-                        [full_prompt, {"mime_type": "audio/wav", "data": audio_bytes}],
+                        [full_prompt, uploaded_file],
                         generation_config={"response_mime_type": "application/json"}
                     )
                     
                     response_json = json.loads(response.text)
                     ai_text = response_json["response_text"]
                     hints = response_json["coach_hints"]
-                    better_response = response_json.get("suggested_response", "No suggestion available.")
+                    better_response = response_json.get("suggested_response", "No suggestion.")
                     
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
                     
@@ -305,96 +265,57 @@ if mode == "Roleplay as Realtor":
                         st.info(f"**Buyer says:** {ai_text}")
                         play_audio_autoplay(tts_audio)
                     with col2:
-                        st.markdown("### 🧠 Live Coaching")
-                        with st.expander("💡 See Suggested Answer", expanded=True):
-                            st.success(f"**What you should have said:**\n\n{better_response}")
-                        
-                        st.write("**Tips:**")
+                        with st.expander("💡 Suggested Answer", expanded=True):
+                            st.success(better_response)
                         for hint in hints:
                             st.caption(f"• {hint}")
                             
                 except Exception as e:
                     st.error(f"AI Error: {e}")
+                finally:
+                    # Cleanup temp file
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
 
     # End Game
-    if st.session_state.turn_count >= 10 and st.session_state.roleplay_active:
-        st.session_state.roleplay_active = False
-        st.divider()
+    if st.session_state.turn_count >= 10:
         st.header("🏁 Session Over!")
-        
-        with st.spinner("Grading your performance..."):
-            model = genai.GenerativeModel(active_model_name)
-            grading_prompt = f"""
-            Review this sales call based on the Training Material.
-            
-            TRAINING MATERIAL:
-            {kb_text[:200000]}
-            
-            HISTORY:
-            {st.session_state.chat_history}
-            
-            OUTPUT JSON:
-            {{
-                "score": (integer 0-10),
-                "feedback_summary": "Summary of performance."
-            }}
-            """
-            
-            grad_resp = model.generate_content(grading_prompt, generation_config={"response_mime_type": "application/json"})
-            grad_json = json.loads(grad_resp.text)
-            
-            final_score = grad_json["score"]
-            final_feedback = grad_json["feedback_summary"]
-            
-            st.metric("Final Score", f"{final_score}/10")
-            st.write(final_feedback)
-            
-            if st.button("Save Result to Scorecard"):
-                save_scorecard(agent_name, final_score, final_feedback)
+        if st.button("Save Scorecard"):
+             save_scorecard(agent_name, 10, "Session Complete")
 
 # ==========================================
 # 7. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
-    st.markdown("You act as the **Buyer**. Throw objections! The AI acts as the **Perfect Realtor** using the Books.")
+    st.markdown("You act as the **Buyer**. Throw objections!")
     
     audio_input_mc = st.audio_input("State your objection")
     
     if audio_input_mc and kb_text:
-        if not active_model_name:
-            st.error("AI Brain disconnected.")
-            st.stop()
-
-        with st.spinner("Formulating perfect rebuttal..."):
-            
-            # CRITICAL FIX FOR MC MODE TOO
+        with st.spinner("Formulating rebuttal..."):
             audio_input_mc.seek(0)
             audio_bytes_mc = audio_input_mc.read()
             
-            model = genai.GenerativeModel(active_model_name)
-            
-            system_prompt_mc = f"""
-            You are the PERFECT REALTOR based on the training books provided.
-            
-            CONTEXT BOOKS:
-            {kb_text[:900000]}
-            
-            INSTRUCTIONS:
-            1. Handle the objection perfectly based on the text provided.
-            2. Output JSON:
-            {{
-                "rebuttal_text": "What you say to the buyer",
-                "why_it_works": "Explanation of the sales technique used."
-            }}
-            """
-            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                tmp_file.write(audio_bytes_mc)
+                tmp_path = tmp_file.name
+
             try:
+                uploaded_file = genai.upload_file(tmp_path)
+                model = genai.GenerativeModel(active_model_name)
+                
+                system_prompt_mc = f"""
+                You are the PERFECT REALTOR.
+                CONTEXT: {kb_text[:900000]}
+                Handle the objection.
+                Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
+                """
+                
                 response_mc = model.generate_content(
-                    [system_prompt_mc, {"mime_type": "audio/wav", "data": audio_bytes_mc}],
+                    [system_prompt_mc, uploaded_file],
                     generation_config={"response_mime_type": "application/json"}
                 )
-                
                 resp_json_mc = json.loads(response_mc.text)
                 rebuttal = resp_json_mc["rebuttal_text"]
                 explanation = resp_json_mc["why_it_works"]
@@ -403,9 +324,10 @@ elif mode == "Roleplay as Homebuyer":
                 
                 st.success(f"**Agent Rebuttal:** {rebuttal}")
                 play_audio_autoplay(tts_audio_mc)
-                
-                with st.expander("Why this works (Training Note)", expanded=True):
+                with st.expander("Why this works"):
                     st.write(explanation)
-                    
             except Exception as e:
                 st.error(f"Error: {e}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
