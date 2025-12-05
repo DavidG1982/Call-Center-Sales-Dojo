@@ -39,50 +39,14 @@ if "session_started" not in st.session_state:
     st.session_state.session_started = False
 if "current_tip" not in st.session_state:
     st.session_state.current_tip = None
-if "active_model" not in st.session_state:
-    st.session_state.active_model = None
+# Prevent KB reload loop
 if "kb_text" not in st.session_state:
     st.session_state.kb_text = ""
 if "file_names" not in st.session_state:
     st.session_state.file_names = []
 
 # ==========================================
-# 2. CACHED MODEL SELECTOR (FIXES HANGING)
-# ==========================================
-@st.cache_data(ttl=3600)
-def find_best_available_model():
-    """Queries the API once per hour to find a working model name."""
-    try:
-        # We convert the generator to a list immediately to cache it safely
-        models = list(genai.list_models())
-        model_names = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        
-        preferences = [
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-flash-001",
-            "models/gemini-1.5-flash-latest",
-            "models/gemini-1.5-pro",
-            "models/gemini-pro"
-        ]
-        
-        for pref in preferences:
-            if pref in model_names:
-                return pref
-        
-        if model_names:
-            return model_names[0]
-            
-        return None
-    except Exception as e:
-        return None
-
-# Load the model name into session state
-if not st.session_state.active_model:
-    with st.spinner("Connecting to AI Brain..."):
-        st.session_state.active_model = find_best_available_model()
-
-# ==========================================
-# 3. GOOGLE DRIVE HELPER FUNCTIONS
+# 2. GOOGLE DRIVE HELPER FUNCTIONS
 # ==========================================
 @st.cache_resource
 def get_drive_service():
@@ -98,6 +62,7 @@ def get_drive_service():
         return None
 
 def load_knowledge_base_from_drive(folder_id):
+    """Downloads all PDFs from the specific Drive folder and extracts text."""
     service = get_drive_service()
     if not service:
         return "", []
@@ -136,7 +101,7 @@ def load_knowledge_base_from_drive(folder_id):
     return full_text, file_list_summary
 
 # ==========================================
-# 4. INITIALIZE KNOWLEDGE BASE
+# 3. INITIALIZE KB
 # ==========================================
 if not st.session_state.kb_text:
     folder_id = st.secrets["drive"]["folder_id"]
@@ -170,7 +135,7 @@ def play_audio_autoplay(audio_bytes):
             """
         st.markdown(md, unsafe_allow_html=True)
 
-# --- GRADING LOGIC ---
+# --- HARSH GRADING ENGINE ---
 def calculate_final_grade_and_save(agent_name, kb_context):
     try:
         transcript = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
@@ -186,9 +151,9 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         
         INSTRUCTIONS:
         1. Give a STRICT Score (0-10).
-           - 0-4: If they missed the point, stayed silent, or gave weak answers.
+           - 0-4: If they missed the point, stayed silent, or gave weak one-word answers.
            - 5-8: Good effort but missed key phrases.
-           - 9-10: Perfect execution.
+           - 9-10: Perfect execution of the "Perspective" close.
         2. Identify specific strengths and weaknesses.
         3. Provide the exact "Magic Words" they should have used.
         
@@ -200,7 +165,8 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         }}
         """
         
-        model = genai.GenerativeModel(st.session_state.active_model)
+        # Use default flash model for grading
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
         response = model.generate_content(
             coach_prompt,
             generation_config={"response_mime_type": "application/json"}
@@ -227,15 +193,11 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         return 0, f"Error generating grade: {e}"
 
 # ==========================================
-# 5. SIDEBAR
+# 4. SIDEBAR
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
-    
-    if st.session_state.active_model:
-        st.success(f"🟢 Connected: {st.session_state.active_model}")
-    else:
-        st.error("🔴 No AI Models Found. Check API Key.")
+    st.success("🟢 AI Connected")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
@@ -264,7 +226,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 6. MODE 1: ROLEPLAY AS REALTOR
+# 5. MODE 1: ROLEPLAY AS REALTOR
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
@@ -308,8 +270,9 @@ if mode == "Roleplay as Realtor":
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
                 try:
+                    # Default Model
                     model = genai.GenerativeModel(
-                        st.session_state.active_model,
+                        "models/gemini-1.5-flash",
                         system_instruction=system_persona
                     )
                     
@@ -340,8 +303,6 @@ if mode == "Roleplay as Realtor":
                     
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
-                    if "404" in str(e):
-                        st.session_state.active_model = None 
 
     # --- MAIN LOOP ---
     else:
@@ -380,7 +341,7 @@ if mode == "Roleplay as Realtor":
                     mime_type = "audio/webm"
                 
                 model = genai.GenerativeModel(
-                    st.session_state.active_model,
+                    "models/gemini-1.5-flash",
                     system_instruction=system_persona
                 )
                 
@@ -452,16 +413,12 @@ if mode == "Roleplay as Realtor":
                 st.success("✅ Results saved to Google Sheets.")
 
 # ==========================================
-# 7. MODE 2: ROLEPLAY AS HOMEBUYER
+# 6. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
     st.markdown("You act as the **Buyer**. Throw objections!")
     
-    if not st.session_state.active_model:
-        st.error("AI Brain not connected.")
-        st.stop()
-
     context_safe_mc = st.session_state.kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
@@ -469,7 +426,9 @@ elif mode == "Roleplay as Homebuyer":
     Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
-    audio_input_mc = st.audio_input("State your objection", key=f"mc_rec_{st.session_state.turn_count}")
+    # Dynamic Key for MC mode
+    audio_key_mc = f"mc_rec_{st.session_state.turn_count}"
+    audio_input_mc = st.audio_input("State your objection", key=audio_key_mc)
     
     if audio_input_mc and st.session_state.kb_text:
         with st.spinner("Formulating rebuttal..."):
@@ -483,7 +442,7 @@ elif mode == "Roleplay as Homebuyer":
 
             try:
                 model = genai.GenerativeModel(
-                    st.session_state.active_model,
+                    "models/gemini-1.5-flash",
                     system_instruction=system_persona_mc
                 )
                 
