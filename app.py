@@ -197,4 +197,160 @@ if mode == "Roleplay as Realtor":
         st.stop()
         
     if not kb_text:
-        st.error("
+        st.error("Knowledge Base Empty.")
+
+    progress = st.session_state.turn_count / 10
+    st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
+
+    # --- HINT SYSTEM ---
+    if st.button("💡 Need a Hint?"):
+        with st.spinner("Generating a hint..."):
+            model = genai.GenerativeModel(active_model_name)
+            history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
+            
+            hint_prompt = f"""
+            You are a Sales Coach. 
+            CONTEXT: {kb_text[:500000]}
+            HISTORY: {history_context}
+            
+            The user is the Realtor. The last message was from the Buyer.
+            Give the Realtor ONE concise bullet point on what they should say next to handle the objection.
+            Do not script it, just give the strategy.
+            """
+            hint_resp = model.generate_content(hint_prompt)
+            st.session_state.last_hint = hint_resp.text
+            
+    if st.session_state.last_hint:
+        st.warning(f"**Coach Whisper:** {st.session_state.last_hint}")
+
+    # --- AUDIO INPUT ---
+    audio_input = st.audio_input("Record your pitch/response")
+
+    if audio_input and st.session_state.roleplay_active:
+        if st.session_state.turn_count < 10:
+            
+            with st.spinner("The Buyer is thinking..."):
+                # 1. AUTO-DETECT FORMAT (FIXES DESKTOP ERROR)
+                audio_input.seek(0)
+                audio_bytes = audio_input.read()
+                
+                if len(audio_bytes) < 100:
+                    st.error("No audio captured.")
+                    st.stop()
+                
+                # Check header bytes for format
+                header = audio_bytes[:4]
+                if header.startswith(b'RIFF'):
+                    mime_type = "audio/wav"
+                else:
+                    mime_type = "audio/webm" # Most browsers default to this
+                
+                # 2. SEND TO GEMINI
+                model = genai.GenerativeModel(active_model_name)
+                context_safe = kb_text[:900000] 
+                
+                system_prompt = f"""
+                You are a SKEPTICAL HOME BUYER. User is Realtor.
+                CONTEXT: {context_safe}
+                INSTRUCTIONS:
+                1. Select 10 random objections from context.
+                2. Respond naturally using one.
+                3. OUTPUT JSON:
+                {{
+                    "response_text": "Spoken response",
+                    "coach_hints": ["Hint 1", "Hint 2"],
+                    "suggested_response": "The PERFECT script the agent should have used."
+                }}
+                """
+                
+                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
+                full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the attached audio."
+
+                try:
+                    response = model.generate_content(
+                        [full_prompt, {"mime_type": mime_type, "data": audio_bytes}],
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    
+                    response_json = json.loads(response.text)
+                    ai_text = response_json["response_text"]
+                    hints = response_json["coach_hints"]
+                    better_response = response_json.get("suggested_response", "No suggestion.")
+                    
+                    tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                    
+                    # Update State
+                    st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
+                    st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
+                    st.session_state.turn_count += 1
+                    st.session_state.last_hint = None # Clear hint after turn
+                    
+                    # Layout Output
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.info(f"**Buyer says:** {ai_text}")
+                        play_audio_autoplay(tts_audio)
+                    with col2:
+                        st.markdown("### 🧠 Live Feedback")
+                        
+                        # THE HINTS YOU ASKED FOR
+                        with st.expander("🏆 Ideal Response (Cheatsheet)", expanded=True):
+                            st.markdown(f"**You should have said:**\n\n_{better_response}_")
+                        
+                        st.write("**Coach Tips:**")
+                        for hint in hints:
+                            st.caption(f"• {hint}")
+                            
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
+
+    # End Game
+    if st.session_state.turn_count >= 10:
+        st.header("🏁 Session Over!")
+        if st.button("Save Scorecard"):
+             save_scorecard(agent_name, 10, "Session Complete")
+
+# ==========================================
+# 7. MODE 2: ROLEPLAY AS HOMEBUYER
+# ==========================================
+elif mode == "Roleplay as Homebuyer":
+    st.title("🎓 Roleplay as Homebuyer")
+    st.markdown("You act as the **Buyer**. Throw objections!")
+    
+    audio_input_mc = st.audio_input("State your objection")
+    
+    if audio_input_mc and kb_text:
+        with st.spinner("Formulating rebuttal..."):
+            audio_input_mc.seek(0)
+            audio_bytes_mc = audio_input_mc.read()
+            
+            # Format Detection
+            if audio_bytes_mc[:4].startswith(b'RIFF'):
+                mime_type_mc = "audio/wav"
+            else:
+                mime_type_mc = "audio/webm"
+
+            model = genai.GenerativeModel(active_model_name)
+            system_prompt_mc = f"""
+            You are the PERFECT REALTOR.
+            CONTEXT: {kb_text[:900000]}
+            Handle the objection.
+            Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
+            """
+            try:
+                response_mc = model.generate_content(
+                    [system_prompt_mc, {"mime_type": mime_type_mc, "data": audio_bytes_mc}],
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                resp_json_mc = json.loads(response_mc.text)
+                rebuttal = resp_json_mc["rebuttal_text"]
+                explanation = resp_json_mc["why_it_works"]
+                
+                tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
+                
+                st.success(f"**Agent Rebuttal:** {rebuttal}")
+                play_audio_autoplay(tts_audio_mc)
+                with st.expander("Why this works"):
+                    st.write(explanation)
+            except Exception as e:
+                st.error(f"Error: {e}")
