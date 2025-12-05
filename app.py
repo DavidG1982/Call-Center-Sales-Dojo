@@ -12,6 +12,7 @@ from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from typing import Optional
 
 # ==========================================
 # 1. SETUP & CONFIGURATION
@@ -81,7 +82,7 @@ def run_async(coro):
         finally:
             loop.close()
 
-def play_audio_autoplay(audio_bytes: bytes | None):
+def play_audio_autoplay(audio_bytes: Optional[bytes]):
     if not audio_bytes:
         return
     b64 = base64.b64encode(audio_bytes).decode()
@@ -368,7 +369,6 @@ Output JSON: {
 
     # --- MAIN LOOP ---
     else:
-        # History Display
         for msg in st.session_state.chat_history:
             if msg.get("role") == "Buyer":
                 st.info(f"**Buyer:** {msg.get('content','')}")
@@ -378,11 +378,9 @@ Output JSON: {
         if st.session_state.current_tip:
             st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
-        # Dynamic key prevents widget loop issues
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
 
-        # Finish Button
         if st.button("🛑 Finish & Grade Session"):
             st.session_state.turn_count = 4
             st.rerun()
@@ -397,7 +395,6 @@ Output JSON: {
                         st.error("No audio captured.")
                         st.stop()
 
-                    # Basic format inference
                     if audio_bytes[:4].startswith(b"RIFF"):
                         mime_type = "audio/wav"
                     else:
@@ -442,11 +439,9 @@ INSTRUCTIONS:
 
                     ai_text = response_json.get("response_text", "")
                     st.session_state.current_tip = response_json.get("strategy_tip", "")
-                    _better_response = response_json.get("suggested_response", "")
 
                     tts_audio = run_async(text_to_speech(ai_text, voice_option))
 
-                    # Log turns (audio content is not transcribed here)
                     st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
                     st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
                     st.session_state.turn_count += 1
