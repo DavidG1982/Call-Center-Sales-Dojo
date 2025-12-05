@@ -341,4 +341,13 @@ elif mode == "Roleplay as Homebuyer":
                 rebuttal = resp_json_mc["rebuttal_text"]
                 explanation = resp_json_mc["why_it_works"]
                 
-                tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice
+                tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
+                
+                st.success(f"**Agent Rebuttal:** {rebuttal}")
+                play_audio_autoplay(tts_audio_mc)
+                
+                with st.expander("Why this works (Training Note)", expanded=True):
+                    st.write(explanation)
+                    
+            except Exception as e:
+                st.error(f"Error: {e}")
