@@ -43,30 +43,63 @@ if "kb_text" not in st.session_state:
     st.session_state.kb_text = ""
 if "file_names" not in st.session_state:
     st.session_state.file_names = []
+if "active_model" not in st.session_state:
+    st.session_state.active_model = None
 
 # ==========================================
-# 2. GOOGLE DRIVE HELPER FUNCTIONS
+# 2. SMART MODEL SELECTOR (CACHED)
+# ==========================================
+@st.cache_data(ttl=3600)
+def get_best_model_name():
+    """Finds the best available Gemini model for this API key."""
+    try:
+        # Get list of models available to this key
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Priority list (Newest/Fastest first)
+        preferences = [
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-flash-001",
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-pro",
+            "models/gemini-pro"
+        ]
+        
+        # Check preferences against available models
+        for pref in preferences:
+            if pref in models:
+                return pref
+        
+        # Fallback: take the first one available
+        if models:
+            return models[0]
+            
+        return "models/gemini-1.5-flash" # Absolute fallback
+    except Exception:
+        return "models/gemini-1.5-flash"
+
+# Load the model name once
+if not st.session_state.active_model:
+    st.session_state.active_model = get_best_model_name()
+
+# ==========================================
+# 3. GOOGLE DRIVE HELPER FUNCTIONS
 # ==========================================
 @st.cache_resource
 def get_drive_service():
     try:
-        # Convert secrets to a standard dict to avoid type issues
-        service_account_info = dict(st.secrets["connections"]["gsheets"])
-        
-        # Create Credentials
+        service_account_info = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
-        
-        # FIX: cache_discovery=False prevents the SSL/Wrong Version error
+        # cache_discovery=False fixes the SSL/Wrong Version error
         return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         st.error(f"Failed to connect to Google Drive: {e}")
         return None
 
 def load_knowledge_base_from_drive(folder_id):
-    """Downloads all PDFs from the specific Drive folder and extracts text."""
     service = get_drive_service()
     if not service:
         return "", []
@@ -155,7 +188,8 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         }}
         """
         
-        model = genai.GenerativeModel("models/gemini-1.5-flash")
+        # Use the auto-detected model
+        model = genai.GenerativeModel(st.session_state.active_model)
         response = model.generate_content(
             coach_prompt,
             generation_config={"response_mime_type": "application/json"}
@@ -182,15 +216,18 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         return 0, f"Error generating grade: {e}"
 
 # ==========================================
-# 3. SIDEBAR
+# 4. SIDEBAR
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
-    st.success("🟢 System Ready")
+    if st.session_state.active_model:
+        st.success(f"🟢 Connected: {st.session_state.active_model}")
+    else:
+        st.warning("⚠️ Connecting...")
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
-    # MANUAL LOAD BUTTON (Fixes Startup Crash)
+    # MANUAL LOAD BUTTON
     if st.button("📂 Load Training Data"):
         folder_id = st.secrets["drive"]["folder_id"]
         with st.spinner("Connecting to Drive..."):
@@ -224,7 +261,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 4. MODE 1: ROLEPLAY AS REALTOR
+# 5. MODE 1: ROLEPLAY AS REALTOR
 # ==========================================
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
@@ -239,7 +276,7 @@ if mode == "Roleplay as Realtor":
         st.info("👈 Please click 'Load Training Data' in the sidebar to begin.")
         st.stop()
 
-    # Progress Bar (Clamped to 100% to prevent crash)
+    # Progress Bar
     display_turn = min(st.session_state.turn_count, 3)
     prog_value = min(display_turn / 3.0, 1.0)
     st.progress(prog_value, text=f"Attempt {display_turn}/3")
@@ -268,9 +305,9 @@ if mode == "Roleplay as Realtor":
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
                 try:
-                    # Hardcoded Model for Stability
+                    # Use the auto-detected model
                     model = genai.GenerativeModel(
-                        "models/gemini-1.5-flash",
+                        st.session_state.active_model,
                         system_instruction=system_persona
                     )
                     
@@ -314,7 +351,7 @@ if mode == "Roleplay as Realtor":
         if st.session_state.current_tip:
             st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
-        # DYNAMIC KEY FIX (Prevents Infinite Loop)
+        # DYNAMIC KEY FIX
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
         
@@ -339,7 +376,7 @@ if mode == "Roleplay as Realtor":
                     mime_type = "audio/webm"
                 
                 model = genai.GenerativeModel(
-                    "models/gemini-1.5-flash",
+                    st.session_state.active_model,
                     system_instruction=system_persona
                 )
                 
@@ -411,7 +448,7 @@ if mode == "Roleplay as Realtor":
                 st.success("✅ Results saved to Google Sheets.")
 
 # ==========================================
-# 5. MODE 2: ROLEPLAY AS HOMEBUYER
+# 6. MODE 2: ROLEPLAY AS HOMEBUYER
 # ==========================================
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
@@ -444,7 +481,7 @@ elif mode == "Roleplay as Homebuyer":
 
             try:
                 model = genai.GenerativeModel(
-                    "models/gemini-1.5-flash",
+                    st.session_state.active_model,
                     system_instruction=system_persona_mc
                 )
                 
