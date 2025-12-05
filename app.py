@@ -263,7 +263,7 @@ with st.sidebar:
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
     st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**.")
-    st.info("🎯 FOCUS: Master ONE objection per session. No time limit.")
+    st.info("🎯 FOCUS: Master ONE objection. The Coach will give you the exact scripts.")
     
     if not agent_name:
         st.warning("Enter Agent Name in sidebar.")
@@ -305,7 +305,7 @@ if mode == "Roleplay as Realtor":
                     Pick ONE random objection from the context. State it clearly.
                     Output JSON: {
                         "response_text": "The objection",
-                        "strategy_tip": "Tip on how to handle this specific objection."
+                        "strategy_tip": "The Magic Phrase to handle this specific objection is: '[Insert Script Here]'"
                     }
                     """]
                     
@@ -316,7 +316,7 @@ if mode == "Roleplay as Realtor":
                     
                     resp_json = json.loads(response.text)
                     opening_line = resp_json.get("response_text", "Hello.")
-                    st.session_state.current_tip = resp_json.get("strategy_tip", "Acknowledge and validate.")
+                    st.session_state.current_tip = resp_json.get("strategy_tip", "Use the 'Feel, Felt, Found' method.")
                     
                     st.session_state.chat_history.append({"role": "Buyer", "content": opening_line})
                     st.session_state.session_started = True
@@ -338,8 +338,9 @@ if mode == "Roleplay as Realtor":
             else:
                 st.write(f"**You:** {msg['content']}")
 
+        # --- COACH'S CHEAT SHEET (SPECIFIC SCRIPTS) ---
         if st.session_state.current_tip:
-            st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
+            st.warning(f"🧠 **Coach's Cheat Sheet:** {st.session_state.current_tip}")
 
         # Unique key for every turn prevents loop
         audio_key = f"rec_{st.session_state.turn_count}"
@@ -379,15 +380,15 @@ if mode == "Roleplay as Realtor":
                 
                 INSTRUCTIONS:
                 1. Listen to the Agent.
-                2. CHECK PERMISSION: If they ask "Can I...?", say "Yes, go ahead."
-                3. EVALUATE: 
-                   - If the answer is WEAK: Push back. "I'm still worried about [Objection]."
-                   - If the answer is PERFECT: Say "Okay, I see your point. That helps." (Do NOT switch topics).
-                4. Output JSON:
+                2. DECISION:
+                   - IF they asked permission ("Can I...?", "May I...?"): Say "Yes, go ahead."
+                   - IF they tried to handle the objection:
+                     - BAD/WEAK? Push back ("I'm still not convinced...").
+                     - GOOD? "Okay, I see your point."
+                3. Output JSON:
                 {{
                     "response_text": "Spoken response",
-                    "strategy_tip": "Tip for the next response.",
-                    "suggested_response": "The PERFECT script they should have used."
+                    "strategy_tip": "CRITICAL: Do not just give advice. Give the Agent the EXACT SENTENCE (Magic Words) they should say next to win this argument."
                 }}
                 """
                 
@@ -400,8 +401,8 @@ if mode == "Roleplay as Realtor":
                     response_json = json.loads(response.text)
                     ai_text = response_json.get("response_text", "")
                     
+                    # Capture the SPECIFIC script for the next turn
                     st.session_state.current_tip = response_json.get("strategy_tip", "")
-                    better_response = response_json.get("suggested_response", "")
                     
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
                     
