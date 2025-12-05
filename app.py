@@ -129,7 +129,7 @@ def load_knowledge_base_from_drive(folder_id):
     return full_text, file_list_summary
 
 # ==========================================
-# 4. AUDIO & LOGIC HELPERS
+# 4. AUDIO & GRADING HELPERS
 # ==========================================
 folder_id = st.secrets["drive"]["folder_id"]
 with st.spinner("Loading Training Materials..."):
@@ -156,21 +156,64 @@ def play_audio_autoplay(audio_bytes):
             """
         st.markdown(md, unsafe_allow_html=True)
 
-def save_scorecard(agent_name, score, feedback):
+# --- NEW: THE HARSH GRADING ENGINE ---
+def calculate_final_grade_and_save(agent_name, kb_context):
     try:
+        # 1. Prepare the Transcript
+        transcript = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
+        
+        # 2. The Harsh Coach Prompt
+        coach_prompt = f"""
+        You are a MASTER SALES COACH. You are grading a roleplay session.
+        
+        TRAINING CONTEXT (The Correct Answers):
+        {kb_context[:200000]}
+        
+        TRANSCRIPT TO GRADE:
+        {transcript}
+        
+        INSTRUCTIONS:
+        1. Be strict and conservative. 
+           - If the agent was silent, gave one-word answers, or ignored objections -> Score < 3.
+           - If the agent was okay but missed opportunities -> Score 4-6.
+           - Only give 8+ for excellence.
+        2. Identify specific strengths and weaknesses based on the Training Context.
+        3. Provide "Magic Words" they should memorize.
+        
+        OUTPUT JSON:
+        {{
+            "score": (integer 0-10),
+            "feedback_summary": "Detailed paragraph for the coach to read. Include what they did wrong and exactly how to fix it.",
+            "magic_words": "3 key phrases they missed"
+        }}
+        """
+        
+        model = genai.GenerativeModel(st.session_state.active_model)
+        response = model.generate_content(
+            coach_prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        result = json.loads(response.text)
+        
+        final_score = result["score"]
+        final_feedback = f"{result['feedback_summary']} (Focus on: {result['magic_words']})"
+        
+        # 3. Save to Sheets
         conn = st.connection("gsheets", type=GSheetsConnection)
         existing_data = conn.read(ttl=0)
         new_row = pd.DataFrame([{
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Agent Name": agent_name,
-            "Score": score,
-            "Feedback": feedback
+            "Score": final_score,
+            "Feedback": final_feedback
         }])
         updated_df = pd.concat([existing_data, new_row], ignore_index=True)
         conn.update(data=updated_df)
-        st.success("✅ Scorecard saved!")
+        
+        return final_score, final_feedback
+        
     except Exception as e:
-        st.error(f"Failed to save score: {e}")
+        return 0, f"Error generating grade: {e}"
 
 # ==========================================
 # 5. SIDEBAR
@@ -222,9 +265,9 @@ if mode == "Roleplay as Realtor":
     progress = st.session_state.turn_count / 10
     st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
 
-    # Limit context for safety
     context_safe = kb_text[:500000]
     
+    # --- UPDATED PERSONA: DRILL DOWN LOGIC ---
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER. The user is a Realtor/ISA.
     
@@ -232,13 +275,14 @@ if mode == "Roleplay as Realtor":
     {context_safe}
     
     BEHAVIOR:
-    1. You are roleplaying. Keep responses concise (1-2 sentences).
-    2. Use the questions/objections found in the CONTEXT.
-    3. At the start, pick ONE random objection from the CONTEXT to open the call.
-    4. Always output JSON.
+    1. ROLEPLAY NATURALLY. Do not just ask list questions.
+    2. IMPORTANT: If the agent answers your objection weakly or ignores it, DO NOT MOVE ON. Press them again. Say "I hear you, but..." and drill down.
+    3. Only introduce a NEW objection if the agent has successfully handled the current one.
+    4. If the audio is silent or unintelligible, say "Are you there? I can't hear you."
+    5. Always output JSON.
     """
 
-    # --- STEP 1: START BUTTON (AI SPEAKS FIRST) ---
+    # --- STEP 1: START BUTTON ---
     if not st.session_state.session_started:
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
@@ -263,7 +307,6 @@ if mode == "Roleplay as Realtor":
                     
                     resp_json = json.loads(response.text)
                     opening_line = resp_json.get("response_text", "Hello.")
-                    # Capture the tip immediately
                     st.session_state.current_tip = resp_json.get("strategy_tip", "Acknowledge and validate.")
                     
                     st.session_state.chat_history.append({"role": "Buyer", "content": opening_line})
@@ -276,7 +319,6 @@ if mode == "Roleplay as Realtor":
                     
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
-                    # Clear model if it fails so we try finding a new one next time
                     if "404" in str(e):
                         st.session_state.active_model = None 
 
@@ -289,16 +331,20 @@ if mode == "Roleplay as Realtor":
             else:
                 st.write(f"**You:** {msg['content']}")
 
-        # --- AUTOMATIC HINT DISPLAY ---
-        # Show the tip for the *current* objection waiting to be answered
+        # Show Hint
         if st.session_state.current_tip:
             st.warning(f"💡 **Strategy Tip:** {st.session_state.current_tip}")
 
         # Audio Input
         audio_input = st.audio_input("Record your response")
+        
+        # Finish Button
+        if st.button("🛑 Finish & Grade Session"):
+            st.session_state.turn_count = 11 # Force end
+            st.rerun()
 
         if audio_input and st.session_state.roleplay_active:
-             if st.session_state.turn_count < 10:
+             if st.session_state.turn_count <= 10:
                 with st.spinner("The Buyer is thinking..."):
                     
                     audio_input.seek(0)
@@ -320,18 +366,21 @@ if mode == "Roleplay as Realtor":
                     
                     history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                     
+                    # --- UPDATED PROMPT: LISTEN & PUSH BACK ---
                     user_turn_prompt = f"""
                     HISTORY SO FAR:
                     {history_context}
                     
                     INSTRUCTIONS:
-                    1. Listen to the Agent's audio response.
-                    2. Respond naturally as the Buyer (Keep it short).
+                    1. Listen to the Agent.
+                    2. EVALUATE: Did they handle your previous objection well?
+                       - IF YES: Accept it ("Okay, that makes sense") and move to a NEW random objection from the list.
+                       - IF NO / WEAK / SILENT: Do NOT move on. Push back. Say "I'm still not sure about that..." or "You didn't answer my question."
                     3. Output JSON:
                     {{
                         "response_text": "Spoken response",
-                        "strategy_tip": "One concise tip on how to handle THIS new objection you just gave.",
-                        "suggested_response": "The PERFECT script the agent should have used for the previous turn."
+                        "strategy_tip": "Tip for the NEXT turn.",
+                        "suggested_response": "The PERFECT script they should have used just now."
                     }}
                     """
                     
@@ -344,7 +393,6 @@ if mode == "Roleplay as Realtor":
                         response_json = json.loads(response.text)
                         ai_text = response_json.get("response_text", "")
                         
-                        # Update the tip for the NEXT turn
                         st.session_state.current_tip = response_json.get("strategy_tip", "")
                         better_response = response_json.get("suggested_response", "")
                         
@@ -360,12 +408,28 @@ if mode == "Roleplay as Realtor":
                     except Exception as e:
                         st.error(f"AI Error: {e}")
 
-    # End Game
-    if st.session_state.turn_count >= 10:
+    # --- STEP 3: FINAL GRADING (HARSH) ---
+    if st.session_state.turn_count > 10:
         st.divider()
-        st.header("🏁 Session Over!")
-        if st.button("Save Scorecard"):
-             save_scorecard(agent_name, 10, "Session Complete")
+        st.header("🏁 Session Complete")
+        
+        if st.session_state.roleplay_active: # Only grade once
+            with st.spinner("👨‍🏫 The Master Coach is grading your performance... (This takes 10 seconds)"):
+                score, feedback = calculate_final_grade_and_save(agent_name, kb_text)
+                st.session_state.roleplay_active = False # Stop grading loop
+                
+                # Display Results
+                if score >= 8:
+                    st.balloons()
+                    color = "green"
+                elif score >= 5:
+                    color = "orange"
+                else:
+                    color = "red"
+                    
+                st.markdown(f"## Final Score: :{color}[{score}/10]")
+                st.info(f"**Coach's Feedback:**\n\n{feedback}")
+                st.success("✅ Results saved to Google Sheets for tracking.")
 
 # ==========================================
 # 7. MODE 2: ROLEPLAY AS HOMEBUYER
