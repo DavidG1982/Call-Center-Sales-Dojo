@@ -41,6 +41,11 @@ if "current_tip" not in st.session_state:
     st.session_state.current_tip = None
 if "active_model" not in st.session_state:
     st.session_state.active_model = None
+# NEW: Store KB in session to prevent "Empty" errors
+if "kb_text" not in st.session_state:
+    st.session_state.kb_text = ""
+if "file_names" not in st.session_state:
+    st.session_state.file_names = []
 
 # ==========================================
 # 2. ROBUST MODEL SELECTOR
@@ -89,8 +94,8 @@ def get_drive_service():
         st.error(f"Failed to connect to Google Drive: {e}")
         return None
 
-@st.cache_data(ttl=3600) 
 def load_knowledge_base_from_drive(folder_id):
+    """Downloads all PDFs from the specific Drive folder and extracts text."""
     service = get_drive_service()
     if not service:
         return "", []
@@ -129,11 +134,20 @@ def load_knowledge_base_from_drive(folder_id):
     return full_text, file_list_summary
 
 # ==========================================
-# 4. AUDIO & GRADING HELPERS
+# 4. INITIALIZE KB (FIXED)
 # ==========================================
-folder_id = st.secrets["drive"]["folder_id"]
-with st.spinner("Loading Training Materials..."):
-    kb_text, file_names = load_knowledge_base_from_drive(folder_id)
+# Only load if empty. This prevents re-loading on every button click.
+if not st.session_state.kb_text:
+    folder_id = st.secrets["drive"]["folder_id"]
+    with st.spinner("Loading Training Materials from Drive..."):
+        text, files = load_knowledge_base_from_drive(folder_id)
+        if text:
+            st.session_state.kb_text = text
+            st.session_state.file_names = files
+        else:
+            # If load failed, don't crash, just show warning
+            st.session_state.kb_text = ""
+            st.session_state.file_names = []
 
 async def text_to_speech(text, voice):
     try:
@@ -172,7 +186,7 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         
         INSTRUCTIONS:
         1. Give a STRICT Score (0-10).
-           - 0-4: If they failed to handle the objection or sounded robotic.
+           - 0-4: If they missed the point, stayed silent, or gave weak one-word answers.
            - 5-8: Good, but missed key phrases.
            - 9-10: Perfect execution of the "Perspective" close.
         2. Identify specific strengths and weaknesses.
@@ -225,8 +239,13 @@ with st.sidebar:
     
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
-    if file_names:
-        st.info(f"📚 {len(file_names)} Files Loaded")
+    if st.session_state.file_names:
+        st.info(f"📚 {len(st.session_state.file_names)} Files Loaded")
+    else:
+        st.warning("⚠️ No Files Loaded")
+        if st.button("🔄 Force Reload Drive"):
+            st.session_state.kb_text = "" # Clear to force reload
+            st.rerun()
     
     voice_option = st.selectbox(
         "AI Voice",
@@ -256,15 +275,15 @@ if mode == "Roleplay as Realtor":
         st.warning("Enter Agent Name in sidebar.")
         st.stop()
         
-    if not kb_text:
-        st.error("Knowledge Base Empty.")
+    if not st.session_state.kb_text:
+        st.error("Knowledge Base Empty. Please click 'Force Reload Drive' in sidebar.")
         st.stop()
 
     # Progress: 3 Turns Max
     prog_value = min(st.session_state.turn_count / 3, 1.0)
     st.progress(prog_value, text=f"Turn {st.session_state.turn_count}/3")
 
-    context_safe = kb_text[:500000]
+    context_safe = st.session_state.kb_text[:500000]
     
     # --- UPDATED "ALLOW PERMISSION" PERSONA ---
     system_persona = f"""
@@ -415,7 +434,7 @@ if mode == "Roleplay as Realtor":
         
         if st.session_state.roleplay_active:
             with st.spinner("👨‍🏫 The Master Coach is grading your performance..."):
-                score, feedback = calculate_final_grade_and_save(agent_name, kb_text)
+                score, feedback = calculate_final_grade_and_save(agent_name, st.session_state.kb_text)
                 st.session_state.roleplay_active = False 
                 
                 if score >= 8:
@@ -441,7 +460,7 @@ elif mode == "Roleplay as Homebuyer":
         st.error("AI Brain not connected.")
         st.stop()
 
-    context_safe_mc = kb_text[:500000]
+    context_safe_mc = st.session_state.kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
     CONTEXT: {context_safe_mc}
@@ -450,7 +469,7 @@ elif mode == "Roleplay as Homebuyer":
     
     audio_input_mc = st.audio_input("State your objection")
     
-    if audio_input_mc and kb_text:
+    if audio_input_mc and st.session_state.kb_text:
         with st.spinner("Formulating rebuttal..."):
             audio_input_mc.seek(0)
             audio_bytes_mc = audio_input_mc.read()
