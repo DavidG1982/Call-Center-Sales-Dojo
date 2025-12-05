@@ -162,7 +162,7 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         transcript = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
         
         coach_prompt = f"""
-        You are a MASTER SALES COACH (The Harsh Judge).
+        You are a MASTER SALES COACH.
         
         TRAINING CONTEXT (The Correct Answers):
         {kb_context[:200000]}
@@ -172,17 +172,17 @@ def calculate_final_grade_and_save(agent_name, kb_context):
         
         INSTRUCTIONS:
         1. Give a STRICT Score (0-10).
-           - 0-3: If they missed the point, stayed silent, or gave weak one-word answers.
-           - 4-7: Average performance.
-           - 8-10: Only for PERFECT handling of objections.
-        2. Identify 3 specific weaknesses.
-        3. Provide 3 "Magic Phrases" they should have used from the text.
+           - 0-4: If they failed to handle the objection or sounded robotic.
+           - 5-8: Good, but missed key phrases.
+           - 9-10: Perfect execution of the "Perspective" close.
+        2. Identify specific strengths and weaknesses.
+        3. Provide the exact "Magic Words" they should have used.
         
         OUTPUT JSON:
         {{
             "score": (integer 0-10),
-            "feedback_summary": "Detailed feedback paragraph.",
-            "magic_words": "Phrase 1, Phrase 2, Phrase 3"
+            "feedback_summary": "Detailed feedback.",
+            "magic_words": "Phrase 1, Phrase 2"
         }}
         """
         
@@ -250,6 +250,7 @@ with st.sidebar:
 if mode == "Roleplay as Realtor":
     st.title("🏡 Roleplay as Realtor")
     st.markdown("You are the **Realtor**. The AI is a **Skeptical Buyer**.")
+    st.caption("OBJECTIVE: Handle ONE objection perfectly in 3 turns.")
     
     if not agent_name:
         st.warning("Enter Agent Name in sidebar.")
@@ -259,28 +260,28 @@ if mode == "Roleplay as Realtor":
         st.error("Knowledge Base Empty.")
         st.stop()
 
-    # Progress: Safety Clamp to 1.0 (100%)
-    prog_value = min(st.session_state.turn_count / 10, 1.0)
-    st.progress(prog_value, text=f"Turn {st.session_state.turn_count}/10")
+    # Progress: 3 Turns Max
+    prog_value = min(st.session_state.turn_count / 3, 1.0)
+    st.progress(prog_value, text=f"Turn {st.session_state.turn_count}/3")
 
     context_safe = kb_text[:500000]
     
-    # --- DRILL SERGEANT PERSONA (STUBBORN) ---
+    # --- UPDATED "ALLOW PERMISSION" PERSONA ---
     system_persona = f"""
-    You are a STUBBORN HOME BUYER roleplaying with a Realtor.
+    You are a SKEPTICAL HOME BUYER.
     
     CONTEXT:
     {context_safe}
     
-    BEHAVIOR:
+    INSTRUCTIONS:
     1. Start with ONE random objection.
-    2. IMPORTANT: Do NOT accept the agent's first answer unless it is absolutely perfect. 
-    3. PUSH BACK. Argue. Say "I hear you, but..." or "That doesn't solve my problem."
-    4. Drill down on the SAME TOPIC for at least 2-3 turns.
-    5. ONLY move to a new objection when the agent has truly won the argument.
-    6. If you change topics, explicitly say: "Okay, fair point. You convinced me on that. But what about [New Topic]?"
-    
-    Always output JSON.
+    2. STAY ON THIS OBJECTION until it is resolved.
+    3. IMPORTANT: If the agent asks for permission (e.g., "Can I share a perspective?", "Can I ask a question?"), YOU MUST SAY "YES".
+       - Do NOT say "I hear you but..." to a permission question.
+       - Say: "Sure, go ahead." or "Okay, what is it?"
+       - AFTER they share the perspective, THEN judge if it makes sense.
+    4. PROHIBITED PHRASES: Do NOT say "I hear you" or "I understand". Be direct.
+    5. Always output JSON.
     """
 
     # --- STEP 1: START BUTTON ---
@@ -339,10 +340,10 @@ if mode == "Roleplay as Realtor":
         
         # Finish Button
         if st.button("🛑 Finish & Grade Session"):
-            st.session_state.turn_count = 11
+            st.session_state.turn_count = 4 # Force end
             st.rerun()
 
-        if audio_input and st.session_state.roleplay_active and st.session_state.turn_count <= 10:
+        if audio_input and st.session_state.roleplay_active and st.session_state.turn_count <= 3:
              with st.spinner("The Buyer is thinking..."):
                 
                 audio_input.seek(0)
@@ -364,16 +365,17 @@ if mode == "Roleplay as Realtor":
                 
                 history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                 
-                # --- DRILL DOWN PROMPT ---
                 user_turn_prompt = f"""
                 HISTORY SO FAR:
                 {history_context}
                 
                 INSTRUCTIONS:
-                1. Listen to the Agent's response.
-                2. DECISION: Did they kill the objection perfectly?
-                   - IF NO: Push back! Say "I'm not sure..." or "That sounds like a sales script." (STAY ON TOPIC).
-                   - IF YES: Say "Okay, good answer." AND THEN switch to a new objection.
+                1. Listen to the Agent.
+                2. DECISION:
+                   - IF they asked permission ("Can I...?", "May I...?"): Say "Yes" or "Go ahead."
+                   - IF they explained a perspective/solution: Judge it.
+                     - If good: "Okay, that makes sense. I can see that."
+                     - If bad/evasive: "That doesn't help me with [Objection]."
                 3. Output JSON:
                 {{
                     "response_text": "Spoken response",
@@ -407,7 +409,7 @@ if mode == "Roleplay as Realtor":
                     st.error(f"AI Error: {e}")
 
     # --- STEP 3: FINAL GRADING ---
-    if st.session_state.turn_count > 10:
+    if st.session_state.turn_count > 3:
         st.divider()
         st.header("🏁 Session Complete")
         
