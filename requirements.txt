@@ -1,6 +1,6 @@
 streamlit
 google-generativeai
-streamlit-google-sheets
+st-gsheets-connection
 edge-tts
 PyPDF2
 pandas
