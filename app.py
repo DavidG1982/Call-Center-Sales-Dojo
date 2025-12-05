@@ -39,28 +39,44 @@ if "session_started" not in st.session_state:
     st.session_state.session_started = False
 if "last_hint" not in st.session_state:
     st.session_state.last_hint = None
+if "active_model" not in st.session_state:
+    st.session_state.active_model = None
 
 # ==========================================
-# 2. MODEL SELECTOR
+# 2. ROBUST MODEL SELECTOR (THE FIX)
 # ==========================================
-def get_model(system_instruction_text=None):
-    """Returns a configured model with the Knowledge Base as System Instruction."""
+def find_best_available_model():
+    """Queries the API to find a working model name."""
     try:
-        # Priority: Flash 1.5 (High Rate Limits) -> Flash 8b -> Pro
-        model_name = "models/gemini-1.5-flash"
+        # Get list of models your key can see
+        models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        model_names = [m.name for m in models]
         
-        # Configure the model with the Books as the 'System Instruction'
-        # This prevents the 'No Audio' error by keeping context separate from prompts
-        if system_instruction_text:
-            return genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system_instruction_text
-            )
-        else:
-            return genai.GenerativeModel(model_name)
-    except Exception as e:
-        st.error(f"Model Error: {e}")
+        # Preference List (Try these in order)
+        preferences = [
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-flash-001",
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-pro",
+            "models/gemini-1.5-pro-001",
+            "models/gemini-pro" # Fallback to older model if necessary
+        ]
+        
+        for pref in preferences:
+            if pref in model_names:
+                return pref
+        
+        # If none of our preferences exist, take the first available one
+        if model_names:
+            return model_names[0]
+            
         return None
+    except Exception as e:
+        return None
+
+# Find the model ONCE and save it
+if not st.session_state.active_model:
+    st.session_state.active_model = find_best_available_model()
 
 # ==========================================
 # 3. GOOGLE DRIVE HELPER FUNCTIONS
@@ -166,6 +182,13 @@ def save_scorecard(agent_name, score, feedback):
 # ==========================================
 with st.sidebar:
     st.title("🥋 Dojo Settings")
+    
+    # DEBUG INFO FOR MODEL
+    if st.session_state.active_model:
+        st.success(f"🟢 Connected: {st.session_state.active_model}")
+    else:
+        st.error("🔴 No AI Models Found. Check API Key permissions.")
+    
     agent_name = st.text_input("Agent Name", placeholder="Enter your name")
     
     if file_names:
@@ -200,13 +223,17 @@ if mode == "Roleplay as Realtor":
         
     if not kb_text:
         st.error("Knowledge Base Empty.")
+        st.stop()
+        
+    if not st.session_state.active_model:
+        st.error("AI Brain not connected.")
+        st.stop()
 
     progress = st.session_state.turn_count / 10
     st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
 
-    # Limit context to avoid 429 Errors (Quota Exceeded)
-    # We use this as the "System Instruction" (The Brain's Background)
-    context_safe = kb_text[:500000] # 500k characters is safe for 1.5 Flash
+    # Limit context to avoid 429 Errors
+    context_safe = kb_text[:500000]
     
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER. The user is a Realtor/ISA.
@@ -226,11 +253,12 @@ if mode == "Roleplay as Realtor":
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting a random objection..."):
                 try:
-                    # Initialize Model with System Instruction (Context)
-                    model = get_model(system_persona)
+                    # Initialize Model
+                    model = genai.GenerativeModel(
+                        st.session_state.active_model,
+                        system_instruction=system_persona
+                    )
                     
-                    # Simple prompt to trigger the first turn
-                    # We pass it as a list to be safe
                     init_prompt = ["Start the conversation. Pick one random objection from the context and say it to the agent."]
                     
                     response = model.generate_content(
@@ -239,7 +267,6 @@ if mode == "Roleplay as Realtor":
                     )
                     
                     resp_json = json.loads(response.text)
-                    # Handle cases where AI puts the text in different JSON fields
                     opening_line = resp_json.get("response_text", resp_json.get("text", "Hello."))
                     
                     # Save to history
@@ -254,8 +281,10 @@ if mode == "Roleplay as Realtor":
                     
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
-                    if "429" in str(e):
-                        st.warning("⏳ Quota Exceeded. Please wait 1 minute and try again.")
+                    if "404" in str(e):
+                        st.error("Model not found. Trying fallback...")
+                        # This catches the 404 and forces a re-search next run
+                        st.session_state.active_model = None 
 
     # --- STEP 2: MAIN LOOP ---
     else:
@@ -269,7 +298,10 @@ if mode == "Roleplay as Realtor":
         # Hint System
         if st.button("💡 Need a Hint?"):
             with st.spinner("Coach is thinking..."):
-                model = get_model(system_persona)
+                model = genai.GenerativeModel(
+                    st.session_state.active_model,
+                    system_instruction=system_persona
+                )
                 history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                 hint_req = [f"The conversation history is:\n{history_context}\n\nGive the Agent 1 short tip on how to respond to the last objection."]
                 hint_resp = model.generate_content(hint_req)
@@ -299,12 +331,13 @@ if mode == "Roleplay as Realtor":
                         mime_type = "audio/webm"
                     
                     # 2. SEND TO GEMINI
-                    # We create a FRESH model instance to ensure clean state
-                    model = get_model(system_persona)
+                    model = genai.GenerativeModel(
+                        st.session_state.active_model,
+                        system_instruction=system_persona
+                    )
                     
                     history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
                     
-                    # We pass the Audio + The History Instructions
                     user_turn_prompt = f"""
                     HISTORY SO FAR:
                     {history_context}
@@ -343,8 +376,6 @@ if mode == "Roleplay as Realtor":
                         
                     except Exception as e:
                         st.error(f"AI Error: {e}")
-                        if "429" in str(e):
-                             st.error("Too many requests (Quota). Please wait 60 seconds.")
 
     # End Game
     if st.session_state.turn_count >= 10:
@@ -360,7 +391,10 @@ elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
     st.markdown("You act as the **Buyer**. Throw objections!")
     
-    # Mode 2 also needs the System Instruction setup
+    if not st.session_state.active_model:
+        st.error("AI Brain not connected.")
+        st.stop()
+
     context_safe_mc = kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
@@ -381,7 +415,10 @@ elif mode == "Roleplay as Homebuyer":
                 mime_type_mc = "audio/webm"
 
             try:
-                model = get_model(system_persona_mc)
+                model = genai.GenerativeModel(
+                    st.session_state.active_model,
+                    system_instruction=system_persona_mc
+                )
                 
                 response_mc = model.generate_content(
                     ["Handle this objection perfectly:", {"mime_type": mime_type_mc, "data": audio_bytes_mc}],
