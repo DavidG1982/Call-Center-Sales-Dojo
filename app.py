@@ -36,22 +36,26 @@ if "roleplay_active" not in st.session_state:
     st.session_state.roleplay_active = True
 if "last_hint" not in st.session_state:
     st.session_state.last_hint = None
+if "session_started" not in st.session_state:
+    st.session_state.session_started = False
 
 # ==========================================
-# 2. MODEL SELECTOR
+# 2. MODEL SELECTOR (Fixed for Quota Limits)
 # ==========================================
 def get_valid_model_name():
     try:
+        # We PRIORITIZE 1.5-Flash because it has the highest Rate Limits (Free Tier friendly)
         candidates = [
             "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-001",
-            "models/gemini-1.5-pro",
-            "models/gemini-2.0-flash-exp"
+            "models/gemini-1.5-pro"
         ]
         my_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
         for cand in candidates:
             if cand in my_models:
                 return cand
+        
         if my_models:
             return my_models[0]
         return None
@@ -182,6 +186,7 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.session_state.turn_count = 0
         st.session_state.roleplay_active = True
+        st.session_state.session_started = False
         st.session_state.last_hint = None
         st.rerun()
 
@@ -202,110 +207,139 @@ if mode == "Roleplay as Realtor":
     progress = st.session_state.turn_count / 10
     st.progress(progress, text=f"Turn {st.session_state.turn_count}/10")
 
-    # --- HINT SYSTEM ---
-    if st.button("💡 Need a Hint?"):
-        with st.spinner("Generating a hint..."):
-            model = genai.GenerativeModel(active_model_name)
-            history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-            
-            hint_prompt = f"""
-            You are a Sales Coach. 
-            CONTEXT: {kb_text[:500000]}
-            HISTORY: {history_context}
-            
-            The user is the Realtor. The last message was from the Buyer.
-            Give the Realtor ONE concise bullet point on what they should say next to handle the objection.
-            Do not script it, just give the strategy.
-            """
-            hint_resp = model.generate_content(hint_prompt)
-            st.session_state.last_hint = hint_resp.text
-            
-    if st.session_state.last_hint:
-        st.warning(f"**Coach Whisper:** {st.session_state.last_hint}")
-
-    # --- AUDIO INPUT ---
-    audio_input = st.audio_input("Record your pitch/response")
-
-    if audio_input and st.session_state.roleplay_active:
-        if st.session_state.turn_count < 10:
-            
-            with st.spinner("The Buyer is thinking..."):
-                # 1. AUTO-DETECT FORMAT (FIXES DESKTOP ERROR)
-                audio_input.seek(0)
-                audio_bytes = audio_input.read()
-                
-                if len(audio_bytes) < 100:
-                    st.error("No audio captured.")
-                    st.stop()
-                
-                # Check header bytes for format
-                header = audio_bytes[:4]
-                if header.startswith(b'RIFF'):
-                    mime_type = "audio/wav"
-                else:
-                    mime_type = "audio/webm" # Most browsers default to this
-                
-                # 2. SEND TO GEMINI
+    # --- STEP 1: START BUTTON (AI SPEAKS FIRST) ---
+    if not st.session_state.session_started:
+        if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
+            with st.spinner("Buyer is selecting a random objection..."):
                 model = genai.GenerativeModel(active_model_name)
-                context_safe = kb_text[:900000] 
+                # Lower context slightly to avoid 429 errors
+                context_safe = kb_text[:700000]
                 
-                system_prompt = f"""
-                You are a SKEPTICAL HOME BUYER. User is Realtor.
+                init_prompt = f"""
+                You are a SKEPTICAL HOME BUYER.
                 CONTEXT: {context_safe}
+                
                 INSTRUCTIONS:
-                1. Select 10 random objections from context.
-                2. Respond naturally using one.
-                3. OUTPUT JSON:
-                {{
-                    "response_text": "Spoken response",
-                    "coach_hints": ["Hint 1", "Hint 2"],
-                    "suggested_response": "The PERFECT script the agent should have used."
-                }}
+                1. Look at the list of objections/questions in the text.
+                2. Select ONE random objection to start the conversation.
+                3. Output JSON: {{ "response_text": "The objection you say" }}
                 """
                 
-                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
-                full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to the attached audio."
-
                 try:
                     response = model.generate_content(
-                        [full_prompt, {"mime_type": mime_type, "data": audio_bytes}],
+                        init_prompt, 
                         generation_config={"response_mime_type": "application/json"}
                     )
+                    resp_json = json.loads(response.text)
+                    opening_line = resp_json["response_text"]
                     
-                    response_json = json.loads(response.text)
-                    ai_text = response_json["response_text"]
-                    hints = response_json["coach_hints"]
-                    better_response = response_json.get("suggested_response", "No suggestion.")
+                    # Save to history
+                    st.session_state.chat_history.append({"role": "Buyer", "content": opening_line})
+                    st.session_state.session_started = True
+                    st.session_state.turn_count = 1
                     
-                    tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                    # Generate Audio
+                    tts_audio = asyncio.run(text_to_speech(opening_line, voice_option))
+                    play_audio_autoplay(tts_audio)
+                    st.rerun()
                     
-                    # Update State
-                    st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
-                    st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
-                    st.session_state.turn_count += 1
-                    st.session_state.last_hint = None # Clear hint after turn
-                    
-                    # Layout Output
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        st.info(f"**Buyer says:** {ai_text}")
-                        play_audio_autoplay(tts_audio)
-                    with col2:
-                        st.markdown("### 🧠 Live Feedback")
-                        
-                        # THE HINTS YOU ASKED FOR
-                        with st.expander("🏆 Ideal Response (Cheatsheet)", expanded=True):
-                            st.markdown(f"**You should have said:**\n\n_{better_response}_")
-                        
-                        st.write("**Coach Tips:**")
-                        for hint in hints:
-                            st.caption(f"• {hint}")
-                            
                 except Exception as e:
-                    st.error(f"AI Error: {e}")
+                    st.error(f"Error starting session: {e}")
+
+    # --- STEP 2: SHOW HISTORY & RECORD ---
+    else:
+        # Show the conversation so far
+        for msg in st.session_state.chat_history:
+            if msg["role"] == "Buyer":
+                st.info(f"**Buyer:** {msg['content']}")
+            else:
+                st.write(f"**You:** {msg['content']}")
+
+        # Hint System
+        if st.button("💡 Need a Hint?"):
+            with st.spinner("Generating a hint..."):
+                model = genai.GenerativeModel(active_model_name)
+                history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
+                hint_prompt = f"""
+                You are a Sales Coach.
+                CONTEXT: {kb_text[:500000]}
+                HISTORY: {history_context}
+                User is Realtor. Give ONE concise strategy tip for the next response.
+                """
+                hint_resp = model.generate_content(hint_prompt)
+                st.session_state.last_hint = hint_resp.text
+        
+        if st.session_state.last_hint:
+            st.warning(f"**Coach Whisper:** {st.session_state.last_hint}")
+
+        # Audio Input
+        audio_input = st.audio_input("Record your response")
+
+        if audio_input and st.session_state.roleplay_active:
+             if st.session_state.turn_count < 10:
+                with st.spinner("The Buyer is thinking..."):
+                    # 1. AUTO-DETECT FORMAT
+                    audio_input.seek(0)
+                    audio_bytes = audio_input.read()
+                    
+                    if len(audio_bytes) < 100:
+                        st.error("No audio captured.")
+                        st.stop()
+                    
+                    if audio_bytes[:4].startswith(b'RIFF'):
+                        mime_type = "audio/wav"
+                    else:
+                        mime_type = "audio/webm"
+                    
+                    # 2. SEND TO GEMINI
+                    model = genai.GenerativeModel(active_model_name)
+                    context_safe = kb_text[:700000] 
+                    
+                    system_prompt = f"""
+                    You are a SKEPTICAL HOME BUYER. User is Realtor.
+                    CONTEXT: {context_safe}
+                    INSTRUCTIONS:
+                    1. Listen to the realtor's response.
+                    2. Choose a new objection from the list or follow up naturally.
+                    3. OUTPUT JSON:
+                    {{
+                        "response_text": "Spoken response",
+                        "coach_hints": ["Hint 1", "Hint 2"],
+                        "suggested_response": "The PERFECT script the agent should have used."
+                    }}
+                    """
+                    
+                    history_context = "\n".join([f"{x['role']}: {x['content']}" for x in st.session_state.chat_history])
+                    full_prompt = f"{system_prompt}\n\nHISTORY:\n{history_context}\n\nRespond to audio."
+
+                    try:
+                        response = model.generate_content(
+                            [full_prompt, {"mime_type": mime_type, "data": audio_bytes}],
+                            generation_config={"response_mime_type": "application/json"}
+                        )
+                        
+                        response_json = json.loads(response.text)
+                        ai_text = response_json["response_text"]
+                        hints = response_json["coach_hints"]
+                        better_response = response_json.get("suggested_response", "No suggestion.")
+                        
+                        tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                        
+                        # Update State
+                        st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
+                        st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
+                        st.session_state.turn_count += 1
+                        st.session_state.last_hint = None
+                        
+                        play_audio_autoplay(tts_audio)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
 
     # End Game
     if st.session_state.turn_count >= 10:
+        st.divider()
         st.header("🏁 Session Over!")
         if st.button("Save Scorecard"):
              save_scorecard(agent_name, 10, "Session Complete")
@@ -324,7 +358,6 @@ elif mode == "Roleplay as Homebuyer":
             audio_input_mc.seek(0)
             audio_bytes_mc = audio_input_mc.read()
             
-            # Format Detection
             if audio_bytes_mc[:4].startswith(b'RIFF'):
                 mime_type_mc = "audio/wav"
             else:
@@ -333,7 +366,7 @@ elif mode == "Roleplay as Homebuyer":
             model = genai.GenerativeModel(active_model_name)
             system_prompt_mc = f"""
             You are the PERFECT REALTOR.
-            CONTEXT: {kb_text[:900000]}
+            CONTEXT: {kb_text[:700000]}
             Handle the objection.
             Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
             """
