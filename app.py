@@ -25,7 +25,6 @@ if not all(k in st.secrets for k in required_secrets):
     st.stop()
 
 # Configure Gemini
-# Switched to 'gemini-1.5-pro' for higher intelligence and better availability
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # Initialize Session State
@@ -75,7 +74,6 @@ def load_knowledge_base_from_drive(folder_id):
             return "", []
 
         for item in items:
-            # Download file
             request = service.files().get_media(fileId=item['id'])
             file_stream = io.BytesIO()
             downloader = MediaIoBaseDownload(file_stream, request)
@@ -84,7 +82,6 @@ def load_knowledge_base_from_drive(folder_id):
             while done is False:
                 status, done = downloader.next_chunk()
 
-            # Extract Text using PyPDF2
             file_stream.seek(0)
             pdf_reader = PyPDF2.PdfReader(file_stream)
             file_text = ""
@@ -191,7 +188,7 @@ if mode == "Roleplay as Realtor":
         st.stop()
 
     if not kb_text:
-        st.error("⚠️ Knowledge Base is empty. Add PDFs (converted from Word) to Drive.")
+        st.error("⚠️ Knowledge Base is empty. Add PDFs to Drive.")
 
     # Progress Bar
     progress = st.session_state.turn_count / 10
@@ -204,10 +201,9 @@ if mode == "Roleplay as Realtor":
             with st.spinner("The Buyer is thinking..."):
                 audio_bytes = audio_input.read()
                 
-                # CHANGED TO GEMINI 1.5 PRO (Smarter & More Stable than Flash)
-                model = genai.GenerativeModel("gemini-1.5-pro")
+                # CHANGED BACK TO FLASH (Most Stable)
+                model = genai.GenerativeModel("gemini-1.5-flash")
                 
-                # Limit context for Pro model just to be safe (though Pro handles 1M+ tokens)
                 context_safe = kb_text[:900000] 
                 
                 system_prompt = f"""
@@ -273,7 +269,7 @@ if mode == "Roleplay as Realtor":
         st.header("🏁 Session Over!")
         
         with st.spinner("Grading your performance..."):
-            model = genai.GenerativeModel("gemini-1.5-pro")
+            model = genai.GenerativeModel("gemini-1.5-flash")
             grading_prompt = f"""
             Review this sales call based on the Training Material.
             
@@ -314,7 +310,7 @@ elif mode == "Roleplay as Homebuyer":
     if audio_input_mc and kb_text:
         with st.spinner("Formulating perfect rebuttal..."):
             audio_bytes_mc = audio_input_mc.read()
-            model = genai.GenerativeModel("gemini-1.5-pro")
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             system_prompt_mc = f"""
             You are the PERFECT REALTOR based on the training books provided.
