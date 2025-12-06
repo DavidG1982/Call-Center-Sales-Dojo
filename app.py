@@ -9,6 +9,7 @@ import json
 import base64
 import io
 import time
+import random
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -278,6 +279,7 @@ if mode == "Roleplay as Realtor":
 
     context_safe = st.session_state.kb_text[:500000]
     
+    # --- DEEP DIVE PERSONA ---
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER.
     
@@ -289,10 +291,12 @@ if mode == "Roleplay as Realtor":
     2. STAY ON THIS EXACT OBJECTION for the entire session. Do NOT switch topics.
     3. If the agent gives a weak answer, push back hard. Say "I hear you, but..."
     4. If the agent asks "Can I share a perspective?", ALWAYS say "Yes, go ahead."
-    5. If the agent handles it perfectly, acknowledge it: "Okay, that actually makes sense." BUT do not offer a new objection. Just let them know they won.
-    6. Always output JSON.
+    5. If the agent handles it perfectly, acknowledge it: "Okay, fair point." BUT do not offer a new objection. Just let them know they won.
+    6. VARIETY: Do not over-use the phrase "That makes sense." Use varied language like "I see," "Okay," "Fair enough," or "I understand."
+    7. Always output JSON.
     """
 
+    # --- START ---
     if not st.session_state.session_started:
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting an objection..."):
@@ -302,12 +306,18 @@ if mode == "Roleplay as Realtor":
                         system_instruction=system_persona
                     )
                     
-                    init_prompt = ["""
-                    Pick ONE random objection from the context. State it clearly.
-                    Output JSON: {
+                    # RANDOM SEED IN PROMPT TO ENSURE VARIETY
+                    seed_val = random.randint(1, 1000)
+                    init_prompt = [f"""
+                    Pick ONE random objection from the context.
+                    CRITICAL: Do NOT pick the most common objections (like Price or Interest Rates). 
+                    Scroll deep into the list and pick a specific, harder, or more obscure objection.
+                    Random Seed: {seed_val}
+                    
+                    Output JSON: {{
                         "response_text": "The objection",
                         "strategy_tip": "The Magic Phrase to handle this specific objection is: '[Insert Script Here]'"
-                    }
+                    }}
                     """]
                     
                     response = model.generate_content(
@@ -330,21 +340,26 @@ if mode == "Roleplay as Realtor":
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
 
+    # --- MAIN LOOP ---
     else:
+        # History
         for msg in st.session_state.chat_history:
             if msg["role"] == "Buyer":
                 st.info(f"**Buyer:** {msg['content']}")
             else:
                 st.write(f"**You:** {msg['content']}")
 
+        # --- COACH'S CHEAT SHEET (SPECIFIC SCRIPTS) ---
         if st.session_state.current_tip:
             st.warning(f"🧠 **Coach's Cheat Sheet:** {st.session_state.current_tip}")
 
+        # Unique key for every turn prevents loop
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
         
+        # Finish Button
         if st.button("🛑 Finish & Grade Session"):
-            st.session_state.roleplay_active = False
+            st.session_state.roleplay_active = False # Trigger grading
             st.rerun()
 
         if audio_input and st.session_state.roleplay_active:
@@ -357,6 +372,7 @@ if mode == "Roleplay as Realtor":
                     st.error("No audio captured.")
                     st.stop()
                 
+                # Format check
                 if audio_bytes[:4].startswith(b'RIFF'):
                     mime_type = "audio/wav"
                 else:
@@ -380,7 +396,8 @@ if mode == "Roleplay as Realtor":
                    - IF they tried to handle the objection:
                      - BAD/WEAK? Push back ("I'm still not convinced...").
                      - GOOD? "Okay, I see your point."
-                3. Output JSON:
+                3. VARY YOUR VOCABULARY. Do not overuse "That makes sense."
+                4. Output JSON:
                 {{
                     "response_text": "Spoken response",
                     "strategy_tip": "CRITICAL: Do not just give advice. Give the Agent the EXACT SENTENCE (Magic Words) they should say next to win this argument."
@@ -409,6 +426,7 @@ if mode == "Roleplay as Realtor":
                 except Exception as e:
                     st.error(f"AI Error: {e}")
 
+    # --- FINAL GRADING ---
     if not st.session_state.roleplay_active:
         st.divider()
         st.header("🏁 Session Complete")
@@ -487,11 +505,11 @@ elif mode == "Roleplay as Homebuyer":
                 
                 tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
                 
-                # Save to State so it persists on rerun
+                # Save to State (FIXED VARIABLE NAME)
                 st.session_state.mode_2_response = {
                     "rebuttal": rebuttal,
                     "explanation": explanation,
-                    "audio": tts_audio
+                    "audio": tts_audio_mc 
                 }
                 
                 st.session_state.turn_count += 1
