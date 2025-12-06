@@ -48,8 +48,6 @@ if "active_model" not in st.session_state:
     st.session_state.active_model = None
 if "mode_2_chat" not in st.session_state:
     st.session_state.mode_2_chat = []
-if "audio_queue" not in st.session_state:
-    st.session_state.audio_queue = None
 
 # ==========================================
 # 2. SMART MODEL SELECTOR (CACHED)
@@ -143,9 +141,15 @@ async def text_to_speech(text, voice):
         return None
 
 def play_audio_autoplay(audio_bytes):
+    # This is the "HTML Hack" for Mode 1 that works well
     if audio_bytes:
-        # Standard Streamlit audio player with autoplay
-        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+        b64 = base64.b64encode(audio_bytes).decode()
+        md = f"""
+            <audio autoplay="true">
+            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+            </audio>
+            """
+        st.markdown(md, unsafe_allow_html=True)
 
 # --- INITIALIZE KB ---
 if not st.session_state.kb_text:
@@ -256,7 +260,6 @@ with st.sidebar:
         st.session_state.session_started = False
         st.session_state.current_tip = None
         st.session_state.mode_2_chat = []
-        st.session_state.audio_queue = None
         st.rerun()
 
 # ==========================================
@@ -330,10 +333,11 @@ if mode == "Roleplay as Realtor":
                     st.session_state.session_started = True
                     st.session_state.turn_count = 1
                     
-                    # Mode 1 HTML Hack works fine, keep it
-                    b64 = base64.b64encode(asyncio.run(text_to_speech(opening_line, voice_option))).decode()
-                    md = f"""<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>"""
-                    st.markdown(md, unsafe_allow_html=True)
+                    # Generate Audio Check (Safety)
+                    tts_audio = asyncio.run(text_to_speech(opening_line, voice_option))
+                    if tts_audio:
+                        play_audio_autoplay(tts_audio)
+                    
                     st.rerun()
                     
                 except Exception as e:
@@ -411,15 +415,16 @@ if mode == "Roleplay as Realtor":
                     ai_text = response_json.get("response_text", "")
                     st.session_state.current_tip = response_json.get("strategy_tip", "")
                     
-                    # Mode 1 HTML Hack (Keep it as it works for this mode)
+                    # Safe Audio Generation
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
-                    b64 = base64.b64encode(tts_audio).decode()
-                    md = f"""<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>"""
-                    st.markdown(md, unsafe_allow_html=True)
                     
                     st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
                     st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
                     st.session_state.turn_count += 1
+                    
+                    # Play if audio exists (fix crash)
+                    if tts_audio:
+                        play_audio_autoplay(tts_audio)
                     
                     st.rerun()
                     
@@ -463,19 +468,20 @@ elif mode == "Roleplay as Homebuyer":
     Output JSON: {{ "user_transcript": "Transcript of user audio", "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
-    # --- AUDIO QUEUE PROCESSOR (Crucial for Mode 2 Sound) ---
-    if st.session_state.audio_queue:
-        play_audio_autoplay(st.session_state.audio_queue)
-        st.session_state.audio_queue = None
-
     # --- DISPLAY CHAT HISTORY ---
-    for msg in st.session_state.mode_2_chat:
+    # We display past interactions here so they persist on refresh
+    for i, msg in enumerate(st.session_state.mode_2_chat):
         with st.chat_message("user"):
             st.write(msg["user_text"])
         with st.chat_message("assistant"):
             st.write(msg["rebuttal"])
             with st.expander("Why this works"):
                 st.write(msg["explanation"])
+            
+            # Show audio player. Auto-play ONLY if it's the very last message added.
+            if msg.get("audio"):
+                is_latest = (i == len(st.session_state.mode_2_chat) - 1)
+                st.audio(msg["audio"], format="audio/mp3", autoplay=is_latest)
 
     # Dynamic Key for Mic
     audio_key_mc = f"mc_rec_{st.session_state.turn_count}"
@@ -511,14 +517,12 @@ elif mode == "Roleplay as Homebuyer":
                 # Generate Audio
                 tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
                 
-                # SAVE AUDIO TO QUEUE (The Fix)
-                st.session_state.audio_queue = tts_audio_mc
-                
                 # Add to history
                 st.session_state.mode_2_chat.append({
                     "user_text": transcript,
                     "rebuttal": rebuttal,
-                    "explanation": explanation
+                    "explanation": explanation,
+                    "audio": tts_audio_mc 
                 })
                 
                 st.session_state.turn_count += 1
