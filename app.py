@@ -46,8 +46,10 @@ if "file_names" not in st.session_state:
     st.session_state.file_names = []
 if "active_model" not in st.session_state:
     st.session_state.active_model = None
-if "mode_2_response" not in st.session_state:
-    st.session_state.mode_2_response = None
+if "mode_2_chat" not in st.session_state:
+    st.session_state.mode_2_chat = []
+if "audio_queue" not in st.session_state:
+    st.session_state.audio_queue = None
 
 # ==========================================
 # 2. SMART MODEL SELECTOR (CACHED)
@@ -142,13 +144,8 @@ async def text_to_speech(text, voice):
 
 def play_audio_autoplay(audio_bytes):
     if audio_bytes:
-        b64 = base64.b64encode(audio_bytes).decode()
-        md = f"""
-            <audio autoplay="true">
-            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-            </audio>
-            """
-        st.markdown(md, unsafe_allow_html=True)
+        # Standard Streamlit audio player with autoplay
+        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
 
 # --- INITIALIZE KB ---
 if not st.session_state.kb_text:
@@ -258,7 +255,8 @@ with st.sidebar:
         st.session_state.roleplay_active = True
         st.session_state.session_started = False
         st.session_state.current_tip = None
-        st.session_state.mode_2_response = None
+        st.session_state.mode_2_chat = []
+        st.session_state.audio_queue = None
         st.rerun()
 
 # ==========================================
@@ -306,7 +304,6 @@ if mode == "Roleplay as Realtor":
                         system_instruction=system_persona
                     )
                     
-                    # RANDOM SEED IN PROMPT TO ENSURE VARIETY
                     seed_val = random.randint(1, 1000)
                     init_prompt = [f"""
                     Pick ONE random objection from the context.
@@ -333,8 +330,10 @@ if mode == "Roleplay as Realtor":
                     st.session_state.session_started = True
                     st.session_state.turn_count = 1
                     
-                    tts_audio = asyncio.run(text_to_speech(opening_line, voice_option))
-                    play_audio_autoplay(tts_audio)
+                    # Mode 1 HTML Hack works fine, keep it
+                    b64 = base64.b64encode(asyncio.run(text_to_speech(opening_line, voice_option))).decode()
+                    md = f"""<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>"""
+                    st.markdown(md, unsafe_allow_html=True)
                     st.rerun()
                     
                 except Exception as e:
@@ -349,15 +348,13 @@ if mode == "Roleplay as Realtor":
             else:
                 st.write(f"**You:** {msg['content']}")
 
-        # --- COACH'S CHEAT SHEET (SPECIFIC SCRIPTS) ---
+        # --- COACH'S CHEAT SHEET ---
         if st.session_state.current_tip:
             st.warning(f"🧠 **Coach's Cheat Sheet:** {st.session_state.current_tip}")
 
-        # Unique key for every turn prevents loop
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
         
-        # Finish Button
         if st.button("🛑 Finish & Grade Session"):
             st.session_state.roleplay_active = False # Trigger grading
             st.rerun()
@@ -414,13 +411,16 @@ if mode == "Roleplay as Realtor":
                     ai_text = response_json.get("response_text", "")
                     st.session_state.current_tip = response_json.get("strategy_tip", "")
                     
+                    # Mode 1 HTML Hack (Keep it as it works for this mode)
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
+                    b64 = base64.b64encode(tts_audio).decode()
+                    md = f"""<audio autoplay="true"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>"""
+                    st.markdown(md, unsafe_allow_html=True)
                     
                     st.session_state.chat_history.append({"role": "Agent", "content": "(Audio Input)"})
                     st.session_state.chat_history.append({"role": "Buyer", "content": ai_text})
                     st.session_state.turn_count += 1
                     
-                    play_audio_autoplay(tts_audio)
                     st.rerun()
                     
                 except Exception as e:
@@ -460,19 +460,22 @@ elif mode == "Roleplay as Homebuyer":
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
     CONTEXT: {context_safe_mc}
-    Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
+    Output JSON: {{ "user_transcript": "Transcript of user audio", "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
-    # Mode 2 UI - State Persistent
-    if st.session_state.mode_2_response:
-        res = st.session_state.mode_2_response
-        st.success(f"**Agent Rebuttal:** {res['rebuttal']}")
-        with st.expander("Why this works", expanded=True):
-            st.write(res['explanation'])
-        
-        # Play Audio if available
-        if res.get('audio'):
-            play_audio_autoplay(res['audio'])
+    # --- AUDIO QUEUE PROCESSOR (Crucial for Mode 2 Sound) ---
+    if st.session_state.audio_queue:
+        play_audio_autoplay(st.session_state.audio_queue)
+        st.session_state.audio_queue = None
+
+    # --- DISPLAY CHAT HISTORY ---
+    for msg in st.session_state.mode_2_chat:
+        with st.chat_message("user"):
+            st.write(msg["user_text"])
+        with st.chat_message("assistant"):
+            st.write(msg["rebuttal"])
+            with st.expander("Why this works"):
+                st.write(msg["explanation"])
 
     # Dynamic Key for Mic
     audio_key_mc = f"mc_rec_{st.session_state.turn_count}"
@@ -496,21 +499,27 @@ elif mode == "Roleplay as Homebuyer":
                 )
                 
                 response_mc = model.generate_content(
-                    ["Handle this objection perfectly:", {"mime_type": mime_type_mc, "data": audio_bytes_mc}],
+                    ["Transcribe the audio and then handle this objection perfectly:", {"mime_type": mime_type_mc, "data": audio_bytes_mc}],
                     generation_config={"response_mime_type": "application/json"}
                 )
                 resp_json_mc = json.loads(response_mc.text)
+                
+                transcript = resp_json_mc.get("user_transcript", "(No transcript available)")
                 rebuttal = resp_json_mc["rebuttal_text"]
                 explanation = resp_json_mc["why_it_works"]
                 
+                # Generate Audio
                 tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
                 
-                # Save to State (FIXED VARIABLE NAME)
-                st.session_state.mode_2_response = {
+                # SAVE AUDIO TO QUEUE (The Fix)
+                st.session_state.audio_queue = tts_audio_mc
+                
+                # Add to history
+                st.session_state.mode_2_chat.append({
+                    "user_text": transcript,
                     "rebuttal": rebuttal,
-                    "explanation": explanation,
-                    "audio": tts_audio_mc 
-                }
+                    "explanation": explanation
+                })
                 
                 st.session_state.turn_count += 1
                 st.rerun()
