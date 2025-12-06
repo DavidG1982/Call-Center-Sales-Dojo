@@ -45,6 +45,8 @@ if "file_names" not in st.session_state:
     st.session_state.file_names = []
 if "active_model" not in st.session_state:
     st.session_state.active_model = None
+if "mode_2_response" not in st.session_state:
+    st.session_state.mode_2_response = None
 
 # ==========================================
 # 2. SMART MODEL SELECTOR (CACHED)
@@ -255,6 +257,7 @@ with st.sidebar:
         st.session_state.roleplay_active = True
         st.session_state.session_started = False
         st.session_state.current_tip = None
+        st.session_state.mode_2_response = None
         st.rerun()
 
 # ==========================================
@@ -275,7 +278,6 @@ if mode == "Roleplay as Realtor":
 
     context_safe = st.session_state.kb_text[:500000]
     
-    # --- DEEP DIVE PERSONA ---
     system_persona = f"""
     You are a SKEPTICAL HOME BUYER.
     
@@ -291,7 +293,6 @@ if mode == "Roleplay as Realtor":
     6. Always output JSON.
     """
 
-    # --- START ---
     if not st.session_state.session_started:
         if st.button("🚀 Start Roleplay (Buyer Speaks First)", type="primary"):
             with st.spinner("Buyer is selecting an objection..."):
@@ -329,26 +330,21 @@ if mode == "Roleplay as Realtor":
                 except Exception as e:
                     st.error(f"Error starting session: {e}")
 
-    # --- MAIN LOOP ---
     else:
-        # History
         for msg in st.session_state.chat_history:
             if msg["role"] == "Buyer":
                 st.info(f"**Buyer:** {msg['content']}")
             else:
                 st.write(f"**You:** {msg['content']}")
 
-        # --- COACH'S CHEAT SHEET (SPECIFIC SCRIPTS) ---
         if st.session_state.current_tip:
             st.warning(f"🧠 **Coach's Cheat Sheet:** {st.session_state.current_tip}")
 
-        # Unique key for every turn prevents loop
         audio_key = f"rec_{st.session_state.turn_count}"
         audio_input = st.audio_input("Record your response", key=audio_key)
         
-        # Finish Button
         if st.button("🛑 Finish & Grade Session"):
-            st.session_state.roleplay_active = False # Trigger grading
+            st.session_state.roleplay_active = False
             st.rerun()
 
         if audio_input and st.session_state.roleplay_active:
@@ -361,7 +357,6 @@ if mode == "Roleplay as Realtor":
                     st.error("No audio captured.")
                     st.stop()
                 
-                # Format check
                 if audio_bytes[:4].startswith(b'RIFF'):
                     mime_type = "audio/wav"
                 else:
@@ -400,8 +395,6 @@ if mode == "Roleplay as Realtor":
                     
                     response_json = json.loads(response.text)
                     ai_text = response_json.get("response_text", "")
-                    
-                    # Capture the SPECIFIC script for the next turn
                     st.session_state.current_tip = response_json.get("strategy_tip", "")
                     
                     tts_audio = asyncio.run(text_to_speech(ai_text, voice_option))
@@ -416,12 +409,9 @@ if mode == "Roleplay as Realtor":
                 except Exception as e:
                     st.error(f"AI Error: {e}")
 
-    # --- FINAL GRADING ---
     if not st.session_state.roleplay_active:
         st.divider()
         st.header("🏁 Session Complete")
-        
-        # We use a flag to prevent double-grading on rerun
         if "graded" not in st.session_state:
             with st.spinner("👨‍🏫 The Master Coach is grading your performance..."):
                 score, feedback = calculate_final_grade_and_save(agent_name, st.session_state.kb_text)
@@ -431,14 +421,7 @@ if mode == "Roleplay as Realtor":
         
         if "final_score" in st.session_state:
             score = st.session_state.final_score
-            if score >= 8:
-                st.balloons()
-                color = "green"
-            elif score >= 5:
-                color = "orange"
-            else:
-                color = "red"
-                
+            color = "green" if score >= 8 else "orange" if score >= 5 else "red"
             st.markdown(f"## Final Score: :{color}[{score}/10]")
             st.info(f"**Coach's Feedback:**\n\n{st.session_state.final_feedback}")
             st.success("✅ Results saved to Google Sheets.")
@@ -449,7 +432,12 @@ if mode == "Roleplay as Realtor":
 elif mode == "Roleplay as Homebuyer":
     st.title("🎓 Roleplay as Homebuyer")
     st.markdown("You act as the **Buyer**. Throw objections!")
+    st.info("The AI acts as the **Perfect Realtor**. Listen to how it handles your toughest questions.")
     
+    if not st.session_state.kb_text:
+        st.info("👈 Please click 'Reload Training Data' in the sidebar.")
+        st.stop()
+
     context_safe_mc = st.session_state.kb_text[:500000]
     system_persona_mc = f"""
     You are the PERFECT REALTOR.
@@ -457,14 +445,27 @@ elif mode == "Roleplay as Homebuyer":
     Output JSON: {{ "rebuttal_text": "...", "why_it_works": "..." }}
     """
     
+    # Mode 2 UI - State Persistent
+    if st.session_state.mode_2_response:
+        res = st.session_state.mode_2_response
+        st.success(f"**Agent Rebuttal:** {res['rebuttal']}")
+        with st.expander("Why this works", expanded=True):
+            st.write(res['explanation'])
+        
+        # Play Audio if available
+        if res.get('audio'):
+            play_audio_autoplay(res['audio'])
+
+    # Dynamic Key for Mic
     audio_key_mc = f"mc_rec_{st.session_state.turn_count}"
     audio_input_mc = st.audio_input("State your objection", key=audio_key_mc)
     
     if audio_input_mc and st.session_state.kb_text:
-        with st.spinner("Formulating rebuttal..."):
+        with st.spinner("Formulating perfect rebuttal..."):
             audio_input_mc.seek(0)
             audio_bytes_mc = audio_input_mc.read()
             
+            # Robust Mime Type
             if audio_bytes_mc[:4].startswith(b'RIFF'):
                 mime_type_mc = "audio/wav"
             else:
@@ -486,10 +487,12 @@ elif mode == "Roleplay as Homebuyer":
                 
                 tts_audio_mc = asyncio.run(text_to_speech(rebuttal, voice_option))
                 
-                st.success(f"**Agent Rebuttal:** {rebuttal}")
-                play_audio_autoplay(tts_audio_mc)
-                with st.expander("Why this works"):
-                    st.write(explanation)
+                # Save to State so it persists on rerun
+                st.session_state.mode_2_response = {
+                    "rebuttal": rebuttal,
+                    "explanation": explanation,
+                    "audio": tts_audio
+                }
                 
                 st.session_state.turn_count += 1
                 st.rerun()
